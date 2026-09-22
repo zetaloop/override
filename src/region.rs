@@ -2,7 +2,6 @@ use ra_ap_syntax::{AstNode, SyntaxKind, SyntaxNode, T, TextRange, TextSize, ast}
 
 use crate::{Result, Selector, Source, select, source::Location};
 
-/// An edge of an object identified by a selector.
 #[derive(Clone, Debug)]
 pub struct Boundary {
     selector: Selector,

@@ -7,7 +7,6 @@ macro_rules! wrap { ($($item:item)*) => { $($item)* }; }
 
 wrap! {
     struct State {
-        // Value supplied by the application.
         value: u32,
     }
 

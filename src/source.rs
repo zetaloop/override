@@ -7,7 +7,6 @@ use ra_ap_syntax::{
 
 use crate::{Result, Selector, flow, fragment};
 
-/// A Rust source file and the declarations available to its queries.
 #[derive(Clone)]
 pub struct Source {
     pub(crate) root: SyntaxNode,
@@ -39,13 +38,11 @@ impl Source {
         Ok(())
     }
 
-    /// Supplies declarations from another module for name and argument resolution.
     pub fn add_source(&mut self, module: &str, source: &Source) {
         self.modules
             .push((module.to_owned(), source.root.clone(), source.edition));
     }
 
-    /// Supplies Rust interface declarations or a named binding pattern for queries.
     pub fn describe(&mut self, description: &str) -> Result<()> {
         let root = match fragment::file(description, self.edition) {
             Ok(root) => root,
@@ -112,7 +109,6 @@ impl fmt::Display for Source {
     }
 }
 
-/// An explicitly supplied declaration for a symbolic query.
 #[derive(Clone, Debug)]
 pub struct Declaration {
     pub(crate) location: Location,
@@ -141,7 +137,6 @@ impl Declaration {
     }
 }
 
-/// A selected object. Editing consumes the selection; later queries see the edited source.
 pub struct Selected<'a> {
     pub(crate) source: &'a mut Source,
     pub(crate) location: Location,

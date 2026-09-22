@@ -6,7 +6,6 @@ use cargo_metadata::{
 
 use crate::{Edition, Result};
 
-/// A package in a Cargo dependency graph.
 #[derive(Clone, Debug)]
 pub struct Package {
     pub(crate) graph: Arc<Metadata>,
@@ -15,12 +14,10 @@ pub struct Package {
 }
 
 impl Package {
-    /// Loads the build script's package and its owning workspace.
     pub fn current() -> Result<Self> {
         Self::load(env::var_os("CARGO_MANIFEST_PATH").ok_or("CARGO_MANIFEST_PATH is unavailable")?)
     }
 
-    /// Loads all declared dependency features for source and manifest inspection.
     pub fn load(manifest: impl AsRef<Path>) -> Result<Self> {
         let manifest = fs::canonicalize(manifest)?;
         let graph = MetadataCommand::new()
@@ -42,7 +39,6 @@ impl Package {
         })
     }
 
-    /// Uses an existing Cargo graph, including its feature and source choices.
     pub fn from_metadata(graph: Metadata, id: &PackageId) -> Result<Self> {
         let index = graph
             .packages
@@ -111,7 +107,6 @@ impl Package {
             })
     }
 
-    /// Selects a dependency by its Cargo.toml key, including renamed dependencies.
     pub fn dependency(&self, alias: &str) -> Result<Self> {
         let mut packages = Vec::new();
         for dependency in self
@@ -138,7 +133,6 @@ impl Package {
         }
     }
 
-    /// Selects a concrete declaration when an alias has platform-specific sources.
     pub fn resolve(&self, dependency: &Dependency) -> Result<Self> {
         if !self.data().dependencies.contains(dependency) {
             return Err("dependency belongs to a different package".into());

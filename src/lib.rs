@@ -1,14 +1,3 @@
-//! Structural edits for Rust dependency sources.
-//!
-//! ```
-//! use r#override::{Edition, Source, item};
-//!
-//! let mut source = Source::parse("struct State { value: u32 }", Edition::Edition2024)?;
-//! source.select(item("State").field("value"))?.set_visibility("pub(crate)")?;
-//! assert_eq!(source.to_string(), "struct State { pub(crate) value: u32 }");
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-
 mod edit;
 mod flow;
 mod fragment;

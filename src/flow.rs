@@ -13,13 +13,11 @@ pub(crate) struct Options {
 }
 
 impl Selected<'_> {
-    /// Restores exits to enclosing functions and loops after extraction.
     pub fn control_flow(mut self) -> Self {
         self.flow.control_flow = true;
         self
     }
 
-    /// Propagates `?` through the enclosing return type's container.
     pub fn propagate(mut self) -> Self {
         self.flow.propagate = true;
         self

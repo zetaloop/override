@@ -10,9 +10,6 @@ use toml::Value;
 use crate::{Package, Result, package::dependency_name};
 
 impl Package {
-    /// Checks dependency identities and activation for a Cargo dependency kind.
-    ///
-    /// Replacement keys are upstream Cargo.toml aliases; values select bridge dependencies.
     pub fn check_dependencies(
         &self,
         upstream: &Package,
@@ -108,7 +105,6 @@ impl Package {
         finish(&self.data().name, &upstream.data().name, differences)
     }
 
-    /// Checks inherited feature wiring while allowing bridge-owned features and dependencies.
     pub fn check_features(
         &self,
         upstream: &Package,
@@ -156,7 +152,6 @@ impl Package {
         finish(&self.data().name, &upstream.data().name, differences)
     }
 
-    /// Compares effective lint settings, including workspace inheritance.
     pub fn check_lints(&self, upstream: &Package) -> Result<()> {
         let expected = upstream.lints()?;
         let actual = self.lints()?;
@@ -250,7 +245,7 @@ impl Package {
     }
 }
 
-/// Compares a pair of compilation targets; target names and test discovery belong to the bridge.
+// Target names and test discovery belong to the bridge.
 pub fn check_target(upstream: &Target, bridge: &Target) -> Result<()> {
     let mut differences = Vec::new();
     compare(

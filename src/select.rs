@@ -10,7 +10,6 @@ use crate::{
     source::Location,
 };
 
-/// A composable query over Rust declarations and structural relationships.
 #[derive(Clone, Debug, Default)]
 pub struct Selector {
     steps: Vec<Step>,

@@ -12,23 +12,20 @@ use crate::{Edition, Package, Result, Source, fragment, package::edition};
 const OWNER: &str = "Source directory prepared by override.\n";
 const MARKER: &str = ".override-source";
 
-/// An editable copy of a package's source files.
 pub struct Sources {
     package: Package,
     directory: PathBuf,
     edition: Edition,
 }
 
-/// A source entry prepared for inclusion at a crate or module root.
 pub struct Entry {
     pub path: PathBuf,
-    /// Inner attributes belong in the including crate's own root source.
+    /// `include!` rejects inner attributes; these belong in the bridge's crate root.
     pub attributes: String,
     edition: Edition,
 }
 
 impl Package {
-    /// Refreshes an output directory with the files selected by Cargo's package rules.
     pub fn prepare(&self, destination: impl AsRef<Path>) -> Result<Sources> {
         let source = fs::canonicalize(self.directory())?;
         let mut files = BTreeSet::new();
@@ -160,7 +157,6 @@ impl Sources {
         &self.directory
     }
 
-    /// Selects the edition of a concrete target for subsequent file edits.
     pub fn target(&mut self, target: &Target) -> Result<&mut Self> {
         if !self.package.data().targets.contains(target) {
             return Err("target belongs to a different package".into());
@@ -194,7 +190,6 @@ impl Sources {
         Ok(())
     }
 
-    /// Separates a target's root attributes from the items accepted by include!.
     pub fn include(&mut self, target: &Target) -> Result<Entry> {
         if !self.package.data().targets.contains(target) {
             return Err("target belongs to a different package".into());
@@ -237,7 +232,6 @@ impl Sources {
 }
 
 impl Entry {
-    /// Exposes the generated entry path to the package being compiled.
     pub fn emit(&self, name: &str) -> Result<()> {
         if name.is_empty()
             || !name
@@ -254,7 +248,6 @@ impl Entry {
         Ok(())
     }
 
-    /// Writes a macro for a helper dependency to export to its consumers.
     pub fn export(&self, name: &str, destination: impl AsRef<Path>) -> Result<()> {
         fragment::name(name, self.edition)?;
         let path = self.path.to_str().ok_or("entry path is not UTF-8")?;

@@ -537,7 +537,6 @@ pub(crate) fn value_type(
     })
 }
 
-/// Resolves a declared type constructor, including supplied aliases and their arguments.
 pub(crate) fn type_shape(
     source: &Source,
     location: &Location,
