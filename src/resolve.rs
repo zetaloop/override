@@ -155,6 +155,38 @@ pub(crate) fn pattern_names(pattern: &ast::Pat) -> Vec<String> {
         .collect()
 }
 
+fn tuple_pattern_bindings(
+    fields: impl IntoIterator<Item = ast::Pat>,
+    field_count: usize,
+) -> Result<Vec<(usize, ast::Pat)>> {
+    let fields = fields.into_iter().collect::<Vec<_>>();
+    let rest = fields
+        .iter()
+        .position(|field| ast::RestPat::can_cast(field.syntax().kind()));
+    let explicit = fields.len() - usize::from(rest.is_some());
+    if explicit > field_count {
+        return Err("tuple pattern has more fields than its declaration".into());
+    }
+    let suffix = rest.map_or(0, |index| fields.len() - index - 1);
+    Ok(fields
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, field)| {
+            if rest == Some(position) {
+                return None;
+            }
+            let index = rest.map_or(position, |rest| {
+                if position < rest {
+                    position
+                } else {
+                    field_count - suffix + position - rest - 1
+                }
+            });
+            Some((index, field))
+        })
+        .collect())
+}
+
 pub(crate) fn node_type(node: &SyntaxNode) -> Option<ast::Type> {
     ast::Type::cast(node.clone()).or_else(|| node.children().find_map(ast::Type::cast))
 }
@@ -1006,6 +1038,10 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
             .map(|field| location.at(field))
             .collect());
     }
+    let field_count = list
+        .children()
+        .filter(|node| ast::TupleField::can_cast(node.kind()) || ast::Type::can_cast(node.kind()))
+        .count();
     let mut positions = HashSet::new();
     for (_, usage) in declarations(source) {
         if let Some(pattern) = ast::TupleStructPat::cast(usage.node.clone())
@@ -1013,7 +1049,7 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                 .path()
                 .is_some_and(|path| references_type(source, &usage, &path_name(&path), location))
         {
-            for (index, field) in pattern.fields().enumerate() {
+            for (index, field) in tuple_pattern_bindings(pattern.fields(), field_count)? {
                 if pattern_names(&field).iter().any(|binding| binding == name) {
                     positions.insert(index);
                 }
@@ -1031,7 +1067,7 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                 ty = inner;
             }
             if references_type(source, &usage, &fragment::spelling(ty.syntax()), location) {
-                for (index, field) in pattern.fields().enumerate() {
+                for (index, field) in tuple_pattern_bindings(pattern.fields(), field_count)? {
                     if pattern_names(&field).iter().any(|binding| binding == name) {
                         positions.insert(index);
                     }
