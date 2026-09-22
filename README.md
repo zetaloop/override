@@ -51,7 +51,8 @@ item("GlobalState::compute_priming_scope")
 | :--- | :--- |
 | Declarations and members | `item`, `implementation`, `field`, `variant`, `parameter`, `generic`, `import`, `attribute` |
 | Calls and control flow | `call`, `argument`, `closure`, `arm`, `for_loop`, `while_loop`, `loop_expr`, `if_expr` |
-| Structural regions | `body`, `condition`, `tail_after` |
+| Structural regions | `body`, `condition`, `region` |
+| Region boundaries | `before`, `after`, `start`, `end` |
 | Context and composition | `has`, `child`, `and`, `or`, `not`, `implementing`, `of_type`, `references`, `macro_call` |
 
 Queries also inspect Rust items and blocks inside macro token trees. Edits are written back through the enclosing token trees.
@@ -72,15 +73,28 @@ Declaration operations include `rename`, `set_visibility`, `add_attribute`, `add
 ### Extracting and delegating
 
 ```rust
-source.select(item("GlobalState::update_diagnostics")
-    .tail_after(["generation", "subscriptions"]))?
+use r#override::root;
+
+source.select(item("GlobalState::update_diagnostics").body()
+    .region(root().child(root().binding("subscriptions")).after(), root().end()))?
     .extract(
         "fn spawn_native_diagnostics(&mut self, generation: DiagnosticsGeneration, subscriptions: std::sync::Arc<[FileId]>)",
         &["generation", "subscriptions"],
     )?;
 ```
 
-`tail_after` selects the function suffix following the named bindings visible at its end. Further selectors operate within that region. `extract` moves a selected body, branch, loop, or symbolic region into the supplied function signature and creates the call using the supplied arguments.
+`region(start, end)` resolves both boundary selectors within the current selection. `before` and `after` refer to the selected object, including its statement semicolon; for a binding, they refer to its declaration. `start` and `end` refer to an object's body or contents. Each boundary uses the same selectors as an ordinary query, including calls, loops, declarations and `has` relationships. Further selectors operate within the resulting region.
+
+```rust
+source.select(item("run").region(
+    r#override::call("prepare").after(),
+    r#override::call("finish").before(),
+))?.extract("fn process(&mut self)", &[])?;
+```
+
+A region must contain complete syntax elements that can form a Rust function body. `extract` moves the selected body, branch, loop or region into the supplied function signature and creates the call using the supplied arguments.
+
+Regions depend on source order even when their boundaries use symbols. They can absorb unrelated code added between those boundaries, so prefer a complete function, loop or branch whenever it expresses the intended operation.
 
 ```rust
 source.select(item("Runtime::block_on_inner")
@@ -89,7 +103,7 @@ source.select(item("Runtime::block_on_inner")
     .delegate("telekio::block_on", &["&self.blocking_pool"])?;
 ```
 
-Call delegation passes the supplied context first, followed by the original method receiver and arguments. Explicit call generics are carried to the helper. Closure delegation passes the original closure after the context. Function and tail-region delegation wrap the selected code in a closure or async block.
+Call delegation passes the supplied context first, followed by the original method receiver and arguments. Explicit call generics are carried to the helper. Closure delegation passes the original closure after the context. Function and region delegation wrap the selected code in a closure or async block.
 
 Extraction checks control-flow destinations. A region containing an exit to its enclosing function or loop needs a selection that carries that destination, such as the function tail or the complete loop.
 

@@ -6,7 +6,7 @@ use ra_ap_syntax::{
     syntax_editor::{Position, Removable, SyntaxEditor},
 };
 
-use crate::{Result, Selected, fragment, resolve, select::arguments};
+use crate::{Result, Selected, fragment, region, resolve, select::arguments, source::Location};
 
 impl Selected<'_> {
     pub fn rename(self, name: &str) -> Result<()> {
@@ -594,13 +594,31 @@ impl Selected<'_> {
 
     pub fn delegate(mut self, helper: &str, context: &[&str]) -> Result<()> {
         let region = self.location.region.take();
+        let asynchronous = self
+            .location
+            .ancestors()
+            .into_iter()
+            .find_map(|ancestor| {
+                if let Some(function) = ast::Fn::cast(ancestor.clone()) {
+                    Some(function.async_token().is_some())
+                } else if let Some(closure) = ast::ClosureExpr::cast(ancestor.clone()) {
+                    Some(closure.async_token().is_some())
+                } else {
+                    ast::BlockExpr::cast(ancestor)
+                        .filter(|block| block.async_token().is_some())
+                        .map(|_| true)
+                }
+            })
+            .unwrap_or(false);
         self.edit(|editor, node, edition| {
             let helper = fragment::path(helper, edition)?;
             let mut inputs = context
                 .iter()
                 .map(|text| fragment::expression(text, edition))
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(arguments) = arguments(node) {
+            if region.is_none()
+                && let Some(arguments) = arguments(node)
+            {
                 let generics = if let Some(method) = ast::MethodCallExpr::cast(node.clone()) {
                     inputs.push(method.receiver().ok_or("method call has no receiver")?);
                     method.generic_arg_list()
@@ -627,24 +645,28 @@ impl Selected<'_> {
                     node,
                     make::expr_call(helper, make::arg_list(inputs)).syntax(),
                 );
-            } else if let Some(closure) = ast::ClosureExpr::cast(node.clone()) {
+            } else if region.is_none()
+                && let Some(closure) = ast::ClosureExpr::cast(node.clone())
+            {
                 inputs.push(ast::Expr::ClosureExpr(closure));
                 editor.replace(
                     node,
                     make::expr_call(make::expr_path(helper), make::arg_list(inputs)).syntax(),
                 );
-            } else if let Some(function) = ast::Fn::cast(node.clone()) {
-                let body = function.body().ok_or("function has no body")?;
-                let asynchronous = function.async_token().is_some();
-                let contents = region.as_ref().map_or_else(
-                    || body.syntax().to_string(),
-                    |region| {
-                        format!(
-                            "{{{}}}",
-                            region.iter().map(ToString::to_string).collect::<String>()
-                        )
-                    },
-                );
+            } else if region.is_some() || ast::Fn::can_cast(node.kind()) {
+                let contents = if let Some(region) = &region {
+                    check_exits(region, region::tail(node, region))?;
+                    format!(
+                        "{{{}}}",
+                        region.iter().map(ToString::to_string).collect::<String>()
+                    )
+                } else {
+                    ast::Fn::cast(node.clone())
+                        .and_then(|function| function.body())
+                        .ok_or("function has no body")?
+                        .syntax()
+                        .to_string()
+                };
                 let wrapped = if asynchronous {
                     format!("async {contents}")
                 } else {
@@ -667,11 +689,16 @@ impl Selected<'_> {
                         .iter()
                         .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
                         .ok_or("selected region is empty")?;
-                    editor.replace_all(
-                        first.clone()..=last.clone(),
-                        vec![call.syntax().clone().into()],
-                    );
+                    let replacement = if region::expression(node, &region) {
+                        call.syntax().clone()
+                    } else {
+                        make::expr_stmt(call).syntax().clone()
+                    };
+                    editor.replace_all(first.clone()..=last.clone(), vec![replacement.into()]);
                 } else {
+                    let body = ast::Fn::cast(node.clone())
+                        .and_then(|function| function.body())
+                        .ok_or("function has no body")?;
                     editor.replace(
                         body.syntax(),
                         make::block_expr(std::iter::empty(), Some(call)).syntax(),
@@ -685,70 +712,210 @@ impl Selected<'_> {
     }
 
     pub fn extract(mut self, signature: &str, arguments: &[&str]) -> Result<()> {
+        let function = self
+            .location
+            .ancestors()
+            .into_iter()
+            .find_map(ast::Fn::cast)
+            .ok_or("extraction requires an enclosing function")?;
+        let anchor = self.location.at(function.syntax().clone()).range().start();
         let selected_region = self.location.region.take();
-        self.edit(|editor, node, edition| {
-            let target = ast::MatchArm::cast(node.clone()).and_then(|arm| arm.expr()).map_or_else(|| node.clone(), |expression| expression.syntax().clone());
+        let mut source = self.source.clone();
+        let generated = Selected {
+            source: &mut source,
+            location: self.location,
+        }
+        .edit(|editor, node, edition| {
+            let target = ast::MatchArm::cast(node.clone())
+                .and_then(|arm| arm.expr())
+                .map_or_else(|| node.clone(), |expression| expression.syntax().clone());
             let node = &target;
-            let function = node.ancestors().find_map(ast::Fn::cast).ok_or("extraction requires an enclosing function")?;
-            let closure_body = node.parent().and_then(ast::ClosureExpr::cast).and_then(|closure| closure.body()).is_some_and(|body| body.syntax() == node);
+            let closure_body = node
+                .parent()
+                .and_then(ast::ClosureExpr::cast)
+                .and_then(|closure| closure.body())
+                .is_some_and(|body| body.syntax() == node);
             let generated = fragment::signature(signature, edition)?;
             let name = generated.name().ok_or("extracted function has no name")?;
-            let params = generated.param_list().ok_or("extracted function has no parameters")?;
-            if params.params().count() != arguments.len() { return Err("signature and call have different argument counts".into()); }
-            let inputs = arguments.iter().map(|text| fragment::expression(text, edition)).collect::<Result<Vec<_>>>()?;
+            let params = generated
+                .param_list()
+                .ok_or("extracted function has no parameters")?;
+            if params.params().count() != arguments.len() {
+                return Err("signature and call have different argument counts".into());
+            }
+            let inputs = arguments
+                .iter()
+                .map(|text| fragment::expression(text, edition))
+                .collect::<Result<Vec<_>>>()?;
             let call: ast::Expr = if params.self_param().is_some() {
-                make::expr_method_call(fragment::expression("self", edition)?, make::name_ref(name.text()), make::arg_list(inputs)).into()
-            } else { make::expr_call(make::expr_path(fragment::path(name.text(), edition)?), make::arg_list(inputs)).into() };
-            let call = if generated.async_token().is_some() { make::expr_await(call) } else { call };
-            let function_body = function.body().and_then(|body| body.stmt_list()).ok_or("function has no body")?;
+                make::expr_method_call(
+                    fragment::expression("self", edition)?,
+                    make::name_ref(name.text()),
+                    make::arg_list(inputs),
+                )
+                .into()
+            } else {
+                make::expr_call(
+                    make::expr_path(fragment::path(name.text(), edition)?),
+                    make::arg_list(inputs),
+                )
+                .into()
+            };
+            let call = if generated.async_token().is_some() {
+                make::expr_await(call)
+            } else {
+                call
+            };
+            let function_body = function
+                .body()
+                .and_then(|body| body.stmt_list())
+                .ok_or("function has no body")?;
             let (region, tail, expression) = if let Some(region) = selected_region {
-                (region, true, true)
+                let tail = region::tail(node, &region);
+                let expression = region::expression(node, &region);
+                (region, tail, expression)
             } else if node == function.syntax() {
                 (block_contents(&function_body)?, true, true)
-            } else if let Some(block) = ast::BlockExpr::cast(node.clone()) && block.modifier().is_none() {
+            } else if let Some(block) = ast::BlockExpr::cast(node.clone())
+                && block.modifier().is_none()
+            {
                 let list = block.stmt_list().ok_or("block has no statements")?;
-                let tail = closure_body || block.syntax() == function.body().ok_or("function has no body")?.syntax();
-                (block_contents(&list)?, tail, tail || list.tail_expr().is_some())
+                let tail = closure_body
+                    || block.syntax() == function.body().ok_or("function has no body")?.syntax();
+                (
+                    block_contents(&list)?,
+                    tail,
+                    tail || list.tail_expr().is_some(),
+                )
             } else {
-                let statement = node.parent().filter(|parent| ast::ExprStmt::can_cast(parent.kind())).unwrap_or_else(|| node.clone());
+                let statement = node
+                    .parent()
+                    .filter(|parent| ast::ExprStmt::can_cast(parent.kind()))
+                    .unwrap_or_else(|| node.clone());
                 let expression = ast::Expr::can_cast(statement.kind());
                 (vec![statement.into()], closure_body, expression)
             };
-            let first = region.iter().find(|element| element.kind() != SyntaxKind::WHITESPACE).ok_or("selected region is empty")?;
-            let last = region.iter().rfind(|element| element.kind() != SyntaxKind::WHITESPACE).ok_or("selected region is empty")?;
-            let range = first.text_range().cover(last.text_range());
-            for node in region.iter().filter_map(|element| element.as_node()).flat_map(|node| node.descendants()) {
-                if node.ancestors().skip(1).take_while(|parent| range.contains_range(parent.text_range()))
-                    .any(|parent| ast::ClosureExpr::can_cast(parent.kind()) || ast::Fn::can_cast(parent.kind())
-                        || ast::BlockExpr::cast(parent).is_some_and(|block| block.async_token().is_some() || block.gen_token().is_some())) { continue }
-                if node.kind() == SyntaxKind::TRY_EXPR && node.ancestors().skip(1).take_while(|parent| range.contains_range(parent.text_range()))
-                    .filter_map(ast::BlockExpr::cast).any(|block| block.try_block_modifier().is_some()) { continue }
-                if matches!(node.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::TRY_EXPR) && !tail {
-                    return Err("return or ? leaves the selected region; extract its enclosing function region".into());
-                }
-                if matches!(node.kind(), SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR) {
-                    let label = node.children().find_map(ast::Lifetime::cast).map(|label| label.to_string());
-                    let target = node.ancestors().skip(1).find(|parent| {
-                        if let Some(label) = &label { parent.children().find_map(ast::Label::cast).is_some_and(|candidate| candidate.to_string().trim_end_matches(':') == label) }
-                        else { matches!(parent.kind(), SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::LOOP_EXPR) }
-                    });
-                    if target.is_none_or(|target| !range.contains_range(target.text_range())) { return Err("loop control leaves the selected region; extract the complete loop".into()); }
-                }
-            }
+            let first = region
+                .iter()
+                .find(|element| element.kind() != SyntaxKind::WHITESPACE)
+                .ok_or("selected region is empty")?;
+            let last = region
+                .iter()
+                .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
+                .ok_or("selected region is empty")?;
+            check_exits(&region, tail)?;
             let body = region.iter().map(ToString::to_string).collect::<String>();
             let body = fragment::expression(&format!("{{{body}}}"), edition)?;
             let (body_editor, generated) = SyntaxEditor::with_ast_node(&generated);
-            body_editor.replace(generated.body().ok_or("missing generated body")?.syntax(), body.syntax());
+            body_editor.replace(
+                generated.body().ok_or("missing generated body")?.syntax(),
+                body.syntax(),
+            );
             let generated = body_editor.finish().new_root().clone();
             let replacement: SyntaxElement = if expression {
                 call.syntax().clone().into()
-            } else { make::expr_stmt(call).syntax().clone().into() };
+            } else {
+                make::expr_stmt(call).syntax().clone().into()
+            };
             editor.replace_all(first.clone()..=last.clone(), vec![replacement]);
-            let indentation = ast::edit::IndentLevel::from_node(function.syntax());
-            editor.insert_all(Position::after(function.syntax()), vec![whitespace(&format!("\n\n{indentation}")), generated.into()]);
+            Ok(generated)
+        })?;
+        let mut root = Location::root(source.root.clone(), source.edition);
+        root.module = source.module.clone();
+        let location = root
+            .descendants()
+            .into_iter()
+            .find(|location| {
+                ast::Fn::can_cast(location.node.kind()) && location.range().start() == anchor
+            })
+            .ok_or("enclosing function is missing after extraction")?;
+        Selected {
+            source: &mut source,
+            location,
+        }
+        .edit(|editor, node, _| {
+            let indentation = ast::edit::IndentLevel::from_node(node);
+            editor.insert_all(
+                Position::after(node),
+                vec![whitespace(&format!("\n\n{indentation}")), generated.into()],
+            );
             Ok(())
-        })
+        })?;
+        self.source.root = source.root;
+        Ok(())
     }
+}
+
+fn check_exits(region: &[SyntaxElement], tail: bool) -> Result<()> {
+    let first = region.first().ok_or("selected region is empty")?;
+    let last = region.last().ok_or("selected region is empty")?;
+    let range = first.text_range().cover(last.text_range());
+    for node in region
+        .iter()
+        .filter_map(|element| element.as_node())
+        .flat_map(|node| node.descendants())
+    {
+        if node
+            .ancestors()
+            .skip(1)
+            .take_while(|parent| range.contains_range(parent.text_range()))
+            .any(|parent| {
+                ast::ClosureExpr::can_cast(parent.kind())
+                    || ast::Fn::can_cast(parent.kind())
+                    || ast::BlockExpr::cast(parent).is_some_and(|block| {
+                        block.async_token().is_some() || block.gen_token().is_some()
+                    })
+            })
+        {
+            continue;
+        }
+        if node.kind() == SyntaxKind::TRY_EXPR
+            && node
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| range.contains_range(parent.text_range()))
+                .filter_map(ast::BlockExpr::cast)
+                .any(|block| block.try_block_modifier().is_some())
+        {
+            continue;
+        }
+        if matches!(node.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::TRY_EXPR) && !tail {
+            return Err(
+                "return or ? leaves the selected region; extract its enclosing function region"
+                    .into(),
+            );
+        }
+        if matches!(
+            node.kind(),
+            SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR
+        ) {
+            let label = node
+                .children()
+                .find_map(ast::Lifetime::cast)
+                .map(|label| label.to_string());
+            let target = node.ancestors().skip(1).find(|parent| {
+                if let Some(label) = &label {
+                    parent
+                        .children()
+                        .find_map(ast::Label::cast)
+                        .is_some_and(|candidate| {
+                            candidate.to_string().trim_end_matches(':') == label
+                        })
+                } else {
+                    matches!(
+                        parent.kind(),
+                        SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::LOOP_EXPR
+                    )
+                }
+            });
+            if target.is_none_or(|target| !range.contains_range(target.text_range())) {
+                return Err(
+                    "loop control leaves the selected region; extract the complete loop".into(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {

@@ -3,7 +3,12 @@ use ra_ap_syntax::{
     ast::{HasArgList, HasLoopBody, HasName},
 };
 
-use crate::{Declaration, Result, Source, fragment, resolve, source::Location};
+use crate::{
+    Declaration, Result, Source, fragment,
+    region::{self, Boundary, Edge},
+    resolve,
+    source::Location,
+};
 
 /// A composable query over Rust declarations and structural relationships.
 #[derive(Clone, Debug, Default)]
@@ -19,7 +24,7 @@ enum Step {
     Argument(String),
     Body,
     Condition,
-    Tail(Vec<String>),
+    Region(Boundary, Boundary),
     Has(Selector),
     And(Selector),
     Not(Selector),
@@ -132,8 +137,20 @@ impl Selector {
     pub fn condition(self) -> Self {
         self.step(Step::Condition)
     }
-    pub fn tail_after(self, bindings: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.step(Step::Tail(bindings.into_iter().map(Into::into).collect()))
+    pub fn region(self, start: Boundary, end: Boundary) -> Self {
+        self.step(Step::Region(start, end))
+    }
+    pub fn before(self) -> Boundary {
+        Boundary::new(self, Edge::Before)
+    }
+    pub fn after(self) -> Boundary {
+        Boundary::new(self, Edge::After)
+    }
+    pub fn start(self) -> Boundary {
+        Boundary::new(self, Edge::Start)
+    }
+    pub fn end(self) -> Boundary {
+        Boundary::new(self, Edge::End)
     }
     pub fn has(self, query: Selector) -> Self {
         self.step(Step::Has(query))
@@ -214,38 +231,9 @@ impl Selector {
                         if scope.region.is_some() {
                             return Err("a region is already a body selection".into());
                         }
-                        let body = if let Some(function) = ast::Fn::cast(scope.node.clone()) {
-                            function.body()
-                        } else if let Some(for_loop) = ast::ForExpr::cast(scope.node.clone()) {
-                            for_loop.loop_body()
-                        } else if let Some(while_loop) = ast::WhileExpr::cast(scope.node.clone()) {
-                            while_loop.loop_body()
-                        } else if let Some(loop_expr) = ast::LoopExpr::cast(scope.node.clone()) {
-                            loop_expr.loop_body()
-                        } else {
-                            None
-                        };
-                        if let Some(body) = body {
-                            next.push(scope.at(body.syntax().clone()));
-                        } else if let Some(closure) = ast::ClosureExpr::cast(scope.node.clone()) {
-                            next.push(
-                                scope.at(closure
-                                    .body()
-                                    .ok_or("closure has no body")?
-                                    .syntax()
-                                    .clone()),
-                            );
-                        } else if let Some(arm) = ast::MatchArm::cast(scope.node.clone()) {
-                            next.push(
-                                scope.at(arm
-                                    .expr()
-                                    .ok_or("arm has no expression")?
-                                    .syntax()
-                                    .clone()),
-                            );
-                        } else {
-                            return Err("selected object has no body".into());
-                        }
+                        next.push(
+                            scope.at(body(&scope.node).ok_or("selected object has no body")?),
+                        );
                     }
                     Step::Condition => {
                         let condition = ast::IfExpr::cast(scope.node.clone())
@@ -265,19 +253,8 @@ impl Selector {
                                 .clone()),
                         );
                     }
-                    Step::Tail(names) => {
-                        if names.is_empty() {
-                            return Err("a symbolic region requires a binding".into());
-                        }
-                        for name in names {
-                            fragment::name(name, source.edition)?;
-                        }
-                        if !ast::Fn::can_cast(scope.node.kind()) || scope.region.is_some() {
-                            return Err("a tail region belongs to a function".into());
-                        }
-                        let mut region = scope.clone();
-                        region.region = Some(resolve::tail(&scope.node, names)?);
-                        next.push(region);
+                    Step::Region(start, end) => {
+                        next.push(region::select(source, scope, start, end)?);
                     }
                     Step::Has(query) => {
                         if !query
@@ -470,6 +447,24 @@ impl Matcher {
                 })
             }
         }
+    }
+}
+
+pub(crate) fn body(node: &ra_ap_syntax::SyntaxNode) -> Option<ra_ap_syntax::SyntaxNode> {
+    if let Some(function) = ast::Fn::cast(node.clone()) {
+        function.body().map(|body| body.syntax().clone())
+    } else if let Some(for_loop) = ast::ForExpr::cast(node.clone()) {
+        for_loop.loop_body().map(|body| body.syntax().clone())
+    } else if let Some(while_loop) = ast::WhileExpr::cast(node.clone()) {
+        while_loop.loop_body().map(|body| body.syntax().clone())
+    } else if let Some(loop_expr) = ast::LoopExpr::cast(node.clone()) {
+        loop_expr.loop_body().map(|body| body.syntax().clone())
+    } else if let Some(closure) = ast::ClosureExpr::cast(node.clone()) {
+        closure.body().map(|body| body.syntax().clone())
+    } else {
+        ast::MatchArm::cast(node.clone())
+            .and_then(|arm| arm.expr())
+            .map(|body| body.syntax().clone())
     }
 }
 

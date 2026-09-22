@@ -895,59 +895,6 @@ fn references_type(source: &Source, usage: &Location, name: &str, target: &Locat
     }
 }
 
-pub(crate) fn tail(
-    node: &SyntaxNode,
-    bindings: &[String],
-) -> Result<Vec<ra_ap_syntax::SyntaxElement>> {
-    let list = ast::Fn::cast(node.clone())
-        .and_then(|function| function.body())
-        .and_then(|body| body.stmt_list())
-        .ok_or("a tail region requires a function body")?;
-    let mut anchor = None;
-    for name in bindings {
-        let binding = list
-            .statements()
-            .filter_map(|statement| match statement {
-                ast::Stmt::LetStmt(binding) => Some(binding),
-                _ => None,
-            })
-            .filter(|binding| {
-                binding.pat().is_some_and(|pattern| {
-                    pattern_names(&pattern)
-                        .iter()
-                        .any(|binding| binding == name)
-                })
-            })
-            .last()
-            .ok_or_else(|| format!("function has no binding `{name}`"))?;
-        let binding = binding.syntax().clone();
-        if anchor
-            .as_ref()
-            .is_none_or(|old: &SyntaxNode| old.text_range().end() < binding.text_range().end())
-        {
-            anchor = Some(binding);
-        }
-    }
-    let anchor = anchor.ok_or("region requires a binding")?;
-    let close = list
-        .r_curly_token()
-        .ok_or("function body has no closing brace")?;
-    let region = list
-        .syntax()
-        .children_with_tokens()
-        .skip_while(|element| element.as_node() != Some(&anchor))
-        .skip(1)
-        .take_while(|element| element.as_token() != Some(&close))
-        .collect::<Vec<_>>();
-    if region
-        .iter()
-        .all(|element| element.kind() == SyntaxKind::WHITESPACE)
-    {
-        return Err("selected region is empty".into());
-    }
-    Ok(region)
-}
-
 pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result<Vec<Location>> {
     fragment::name(name, source.edition)?;
     if let Some(arguments) = arguments(&location.node) {

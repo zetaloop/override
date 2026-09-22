@@ -11,6 +11,7 @@
 
 mod edit;
 mod fragment;
+mod region;
 mod resolve;
 mod select;
 mod source;
@@ -32,6 +33,7 @@ pub use package::Package;
 pub use sources::{Entry, Sources};
 
 pub use ra_ap_syntax::Edition;
+pub use region::Boundary;
 pub use select::{Selector, arm, call, item, root};
 pub use source::{Declaration, Selected, Source};
 

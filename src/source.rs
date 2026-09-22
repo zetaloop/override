@@ -160,15 +160,15 @@ impl Selected<'_> {
         }
     }
 
-    pub(crate) fn edit(
+    pub(crate) fn edit<T>(
         self,
-        operation: impl FnOnce(&SyntaxEditor, &SyntaxNode, Edition) -> Result<()>,
-    ) -> Result<()> {
+        operation: impl FnOnce(&SyntaxEditor, &SyntaxNode, Edition) -> Result<T>,
+    ) -> Result<T> {
         if self.location.region.is_some() {
-            return Err("a symbolic region supports extraction and delegation".into());
+            return Err("a region supports extraction and delegation".into());
         }
         let (editor, _) = SyntaxEditor::new(self.location.root.clone());
-        operation(&editor, &self.location.node, self.source.edition)?;
+        let result = operation(&editor, &self.location.node, self.source.edition)?;
         let mut root = editor.finish().new_root().clone();
         for parent in self.location.parents.iter().rev() {
             let text = root.to_string();
@@ -185,7 +185,7 @@ impl Selected<'_> {
             root = editor.finish().new_root().clone();
         }
         self.source.root = root;
-        Ok(())
+        Ok(result)
     }
 }
 

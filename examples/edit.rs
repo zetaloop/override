@@ -95,7 +95,7 @@ fn main() {
         .select(item("main").record("State"))?
         .add_field("bias: 10")?;
     source
-        .select(item("State::total").tail_after(["seed", "increment"]))?
+        .select(item("State::total").region(root().binding("increment").after(), root().end()))?
         .extract(
             "fn sum(&self, seed: u32, increment: u32) -> u32",
             &["seed", "increment"],
@@ -103,13 +103,13 @@ fn main() {
     source
         .select(
             item("State::total")
-                .tail_after(["seed", "increment"])
+                .region(root().binding("increment").after(), root().end())
                 .call("sum")
                 .argument("seed"),
         )?
         .set_value("seed + 1")?;
     source
-        .select(item("State::total").tail_after(["seed", "increment"]))?
+        .select(item("State::total").region(root().binding("increment").after(), root().end()))?
         .delegate("once", &[])?;
     source
         .select(item("State::route").arm("Mode::Local").call("compute"))?
