@@ -412,9 +412,13 @@ fn expression_type(location: &Location, expression: &ast::Expr) -> Option<ast::T
                     .self_ty();
             }
             for ancestor in location.ancestors() {
-                if let Some(function) = ast::Fn::cast(ancestor.clone())
-                    && let Some(parameters) = function.param_list()
-                {
+                let parameters = ast::Fn::cast(ancestor.clone())
+                    .and_then(|function| function.param_list())
+                    .or_else(|| {
+                        ast::ClosureExpr::cast(ancestor.clone())
+                            .and_then(|closure| closure.param_list())
+                    });
+                if let Some(parameters) = parameters {
                     for parameter in parameters.params() {
                         if parameter
                             .pat()
