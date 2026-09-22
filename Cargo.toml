@@ -2,5 +2,10 @@
 name = "override"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+description = "Structural Rust source editing and dependency build tools"
+license = "MIT"
 
 [dependencies]
+ra_ap_syntax = "0.0.352"
+unicode-ident = "=1.0.24"
