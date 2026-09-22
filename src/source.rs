@@ -5,7 +5,7 @@ use ra_ap_syntax::{
     syntax_editor::SyntaxEditor,
 };
 
-use crate::{Result, Selector, fragment};
+use crate::{Result, Selector, flow, fragment};
 
 /// A Rust source file and the declarations available to its queries.
 #[derive(Clone)]
@@ -72,6 +72,7 @@ impl Source {
         Ok(Selected {
             source: self,
             location,
+            flow: flow::Options::default(),
         })
     }
 
@@ -144,6 +145,7 @@ impl Declaration {
 pub struct Selected<'a> {
     pub(crate) source: &'a mut Source,
     pub(crate) location: Location,
+    pub(crate) flow: flow::Options,
 }
 
 impl Selected<'_> {
@@ -166,6 +168,9 @@ impl Selected<'_> {
     ) -> Result<T> {
         if self.location.region.is_some() {
             return Err("a region supports extraction and delegation".into());
+        }
+        if self.flow != flow::Options::default() {
+            return Err("control-flow options require extraction".into());
         }
         let (editor, _) = SyntaxEditor::new(self.location.root.clone());
         let result = operation(&editor, &self.location.node, self.source.edition)?;

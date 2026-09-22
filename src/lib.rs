@@ -10,6 +10,7 @@
 //! ```
 
 mod edit;
+mod flow;
 mod fragment;
 mod region;
 mod resolve;

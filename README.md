@@ -105,7 +105,25 @@ source.select(item("Runtime::block_on_inner")
 
 Call delegation passes the supplied context first, followed by the original method receiver and arguments. Explicit call generics are carried to the helper. Closure delegation passes the original closure after the context. Function and region delegation wrap the selected code in a closure or async block.
 
-Extraction checks control-flow destinations. A region containing an exit to its enclosing function or loop needs a selection that carries that destination, such as the function tail or the complete loop.
+Extraction options precede the editing operation:
+
+```rust
+source.select(item("Parser::parse").for_loop().body())?
+    .control_flow()
+    .propagate()
+    .extract(
+        "fn parse_item(&self, text: &str, output: &mut Vec<i32>)",
+        &["text", "output"],
+    )?;
+```
+
+The signature describes the result of normal completion. `control_flow()` converts exits to enclosing functions and loops into `core::ops::ControlFlow`, then restores the original `return`, `break` or `continue` at the call site, including labels and carried values. A single exit uses its value directly; several exits use a generated enum named after the extracted function, such as `ParseItemExit`. The enum is declared in the enclosing item scope with the supplied function's visibility. Its payload types are generic so it can also carry values using the function's type and lifetime parameters.
+
+`propagate()` carries `?` through the enclosing `Result`, `Option` or `ControlFlow` container and applies `?` to the generated call. Combined with `control_flow()`, a `Result` context produces `Result<ControlFlow<Exit, Output>, Error>`. Available type aliases, generic arguments and imports participate in resolving the container; `add_source` and `describe` can supply external declarations. Payload types come from the enclosing return declaration, an annotated loop destination or the value's declaration. Missing type information produces an error.
+
+Control flow whose destination lies within the selected structure travels with that structure. Ordinary extraction also supports exits carried by a complete function body or its suffix. Other external exits require the corresponding option.
+
+Parameters, ownership and borrowing follow the supplied signature and arguments. Extracted locals have the new function's scope and destruction time; the patch author chooses a region and interface suitable for those lifetimes.
 
 ### Supplying declarations
 

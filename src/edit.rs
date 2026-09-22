@@ -6,7 +6,9 @@ use ra_ap_syntax::{
     syntax_editor::{Position, Removable, SyntaxEditor},
 };
 
-use crate::{Result, Selected, fragment, region, resolve, select::arguments, source::Location};
+use crate::{
+    Result, Selected, flow, fragment, region, resolve, select::arguments, source::Location,
+};
 
 impl Selected<'_> {
     pub fn rename(self, name: &str) -> Result<()> {
@@ -610,6 +612,7 @@ impl Selected<'_> {
                 }
             })
             .unwrap_or(false);
+        let location = self.location.clone();
         self.edit(|editor, node, edition| {
             let helper = fragment::path(helper, edition)?;
             let mut inputs = context
@@ -655,7 +658,7 @@ impl Selected<'_> {
                 );
             } else if region.is_some() || ast::Fn::can_cast(node.kind()) {
                 let contents = if let Some(region) = &region {
-                    check_exits(region, region::tail(node, region))?;
+                    flow::check(&location, region, region::tail(node, region))?;
                     format!(
                         "{{{}}}",
                         region.iter().map(ToString::to_string).collect::<String>()
@@ -720,10 +723,12 @@ impl Selected<'_> {
             .ok_or("extraction requires an enclosing function")?;
         let anchor = self.location.at(function.syntax().clone()).range().start();
         let selected_region = self.location.region.take();
+        let location = self.location.clone();
         let mut source = self.source.clone();
-        let generated = Selected {
+        let (generated, declaration) = Selected {
             source: &mut source,
             location: self.location,
+            flow: flow::Options::default(),
         }
         .edit(|editor, node, edition| {
             let target = ast::MatchArm::cast(node.clone())
@@ -803,14 +808,35 @@ impl Selected<'_> {
                 .iter()
                 .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
                 .ok_or("selected region is empty")?;
-            check_exits(&region, tail)?;
-            let body = region.iter().map(ToString::to_string).collect::<String>();
-            let body = fragment::expression(&format!("{{{body}}}"), edition)?;
+            let transformed = flow::extract(
+                self.source,
+                &location,
+                &region,
+                tail,
+                &generated,
+                call,
+                self.flow,
+            )?;
+            let call = transformed.call;
             let (body_editor, generated) = SyntaxEditor::with_ast_node(&generated);
             body_editor.replace(
                 generated.body().ok_or("missing generated body")?.syntax(),
-                body.syntax(),
+                transformed.body.syntax(),
             );
+            if let Some(ty) = transformed.return_type {
+                let signature = fragment::signature(&format!("fn f() -> {ty}"), edition)?;
+                let ret = signature.ret_type().ok_or("missing return type")?;
+                if let Some(old) = generated.ret_type() {
+                    body_editor.replace(old.syntax(), ret.syntax());
+                } else {
+                    body_editor.insert_all(
+                        Position::after(
+                            generated.param_list().ok_or("missing parameters")?.syntax(),
+                        ),
+                        vec![whitespace(" "), ret.syntax().clone().into()],
+                    );
+                }
+            }
             let generated = body_editor.finish().new_root().clone();
             let replacement: SyntaxElement = if expression {
                 call.syntax().clone().into()
@@ -818,7 +844,7 @@ impl Selected<'_> {
                 make::expr_stmt(call).syntax().clone().into()
             };
             editor.replace_all(first.clone()..=last.clone(), vec![replacement]);
-            Ok(generated)
+            Ok((generated, transformed.declaration))
         })?;
         let mut root = Location::root(source.root.clone(), source.edition);
         root.module = source.module.clone();
@@ -829,9 +855,31 @@ impl Selected<'_> {
                 ast::Fn::can_cast(location.node.kind()) && location.range().start() == anchor
             })
             .ok_or("enclosing function is missing after extraction")?;
+        let owner = location
+            .ancestors()
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::FN | SyntaxKind::IMPL | SyntaxKind::TRAIT
+                ) && node.parent().is_some_and(|parent| {
+                    matches!(
+                        parent.kind(),
+                        SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST | SyntaxKind::STMT_LIST
+                    )
+                }) && location.at(node.clone()).parents.iter().all(|frame| {
+                    !frame
+                        .tree
+                        .syntax()
+                        .ancestors()
+                        .any(|ancestor| matches!(ancestor.kind(), SyntaxKind::ASSOC_ITEM_LIST))
+                })
+            })
+            .map(|node| location.at(node));
         Selected {
             source: &mut source,
             location,
+            flow: flow::Options::default(),
         }
         .edit(|editor, node, _| {
             let indentation = ast::edit::IndentLevel::from_node(node);
@@ -841,81 +889,49 @@ impl Selected<'_> {
             );
             Ok(())
         })?;
+        if let Some(declaration) = declaration {
+            let owner = owner.ok_or("extracted control-flow type has no declaration scope")?;
+            let mut root = Location::root(source.root.clone(), source.edition);
+            root.module = source.module.clone();
+            let location = root
+                .descendants()
+                .into_iter()
+                .find(|location| {
+                    location.node.kind() == owner.node.kind()
+                        && location.range().start() == owner.range().start()
+                })
+                .ok_or("control-flow declaration scope is missing after extraction")?;
+            let name = declaration.name().ok_or("control-flow type has no name")?;
+            let scope = location.node.parent().ok_or("declaration has no parent")?;
+            if location.at(scope).descendants().iter().any(|candidate| {
+                candidate
+                    .node
+                    .children()
+                    .find_map(ast::Name::cast)
+                    .is_some_and(|existing| existing.text() == name.text())
+            }) {
+                return Err(format!("control-flow type `{}` already exists", name.text()).into());
+            }
+            Selected {
+                source: &mut source,
+                location,
+                flow: flow::Options::default(),
+            }
+            .edit(|editor, node, _| {
+                let indentation = ast::edit::IndentLevel::from_node(node);
+                editor.insert_all(
+                    Position::before(node),
+                    vec![
+                        declaration.syntax().clone().into(),
+                        whitespace(&format!("\n\n{indentation}")),
+                    ],
+                );
+                Ok(())
+            })?;
+        }
         self.source.root = source.root;
         Ok(())
     }
-}
-
-fn check_exits(region: &[SyntaxElement], tail: bool) -> Result<()> {
-    let first = region.first().ok_or("selected region is empty")?;
-    let last = region.last().ok_or("selected region is empty")?;
-    let range = first.text_range().cover(last.text_range());
-    for node in region
-        .iter()
-        .filter_map(|element| element.as_node())
-        .flat_map(|node| node.descendants())
-    {
-        if node
-            .ancestors()
-            .skip(1)
-            .take_while(|parent| range.contains_range(parent.text_range()))
-            .any(|parent| {
-                ast::ClosureExpr::can_cast(parent.kind())
-                    || ast::Fn::can_cast(parent.kind())
-                    || ast::BlockExpr::cast(parent).is_some_and(|block| {
-                        block.async_token().is_some() || block.gen_token().is_some()
-                    })
-            })
-        {
-            continue;
-        }
-        if node.kind() == SyntaxKind::TRY_EXPR
-            && node
-                .ancestors()
-                .skip(1)
-                .take_while(|parent| range.contains_range(parent.text_range()))
-                .filter_map(ast::BlockExpr::cast)
-                .any(|block| block.try_block_modifier().is_some())
-        {
-            continue;
-        }
-        if matches!(node.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::TRY_EXPR) && !tail {
-            return Err(
-                "return or ? leaves the selected region; extract its enclosing function region"
-                    .into(),
-            );
-        }
-        if matches!(
-            node.kind(),
-            SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR
-        ) {
-            let label = node
-                .children()
-                .find_map(ast::Lifetime::cast)
-                .map(|label| label.to_string());
-            let target = node.ancestors().skip(1).find(|parent| {
-                if let Some(label) = &label {
-                    parent
-                        .children()
-                        .find_map(ast::Label::cast)
-                        .is_some_and(|candidate| {
-                            candidate.to_string().trim_end_matches(':') == label
-                        })
-                } else {
-                    matches!(
-                        parent.kind(),
-                        SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::LOOP_EXPR
-                    )
-                }
-            });
-            if target.is_none_or(|target| !range.contains_range(target.text_range())) {
-                return Err(
-                    "loop control leaves the selected region; extract the complete loop".into(),
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {

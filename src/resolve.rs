@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ra_ap_syntax::{
     AstNode, Edition, SyntaxKind, SyntaxNode, ast,
-    ast::{HasName, HasTypeBounds},
+    ast::{HasGenericArgs, HasName, HasTypeBounds},
 };
 
 use crate::{Result, Source, fragment, select::arguments, source::Location};
@@ -399,7 +399,22 @@ fn paths(location: &Location, name: &str) -> Vec<String> {
 
 fn expression_type(location: &Location, expression: &ast::Expr) -> Option<ast::Type> {
     match expression {
-        ast::Expr::RefExpr(reference) => expression_type(location, &reference.expr()?),
+        ast::Expr::RefExpr(reference) => {
+            let ty = expression_type(location, &reference.expr()?)?;
+            fragment::ty(
+                &format!(
+                    "&{}{}",
+                    if reference.mut_token().is_some() {
+                        "mut "
+                    } else {
+                        ""
+                    },
+                    ty
+                ),
+                location.edition,
+            )
+            .ok()
+        }
         ast::Expr::ParenExpr(paren) => expression_type(location, &paren.expr()?),
         ast::Expr::CastExpr(cast) => cast.ty(),
         ast::Expr::PathExpr(path) => {
@@ -472,6 +487,277 @@ fn expression_type(location: &Location, expression: &ast::Expr) -> Option<ast::T
         }
         _ => None,
     }
+}
+
+pub(crate) fn expected_type(location: &Location) -> Option<ast::Type> {
+    let mut node = location.node.clone();
+    loop {
+        let parent = node.parent()?;
+        if let Some(binding) = ast::LetStmt::cast(parent.clone()) {
+            return binding.ty();
+        }
+        if let Some(function) = ast::Fn::cast(parent.clone()) {
+            return function.ret_type().and_then(|ret| ret.ty());
+        }
+        if let Some(closure) = ast::ClosureExpr::cast(parent.clone()) {
+            return closure.ret_type().and_then(|ret| ret.ty());
+        }
+        if let Some(list) = ast::StmtList::cast(parent.clone()) {
+            if list.tail_expr().as_ref().map(AstNode::syntax) != Some(&node) {
+                return None;
+            }
+        } else if !matches!(
+            parent.kind(),
+            SyntaxKind::BLOCK_EXPR | SyntaxKind::PAREN_EXPR
+        ) {
+            return None;
+        }
+        node = parent;
+    }
+}
+
+pub(crate) fn value_type(
+    source: &Source,
+    location: &Location,
+    expression: &ast::Expr,
+) -> Option<ast::Type> {
+    expression_type(location, expression).or_else(|| {
+        let declaration = call_declaration(
+            source,
+            &location.at(expression.syntax().clone()),
+            ast::Fn::can_cast,
+        )
+        .ok()?;
+        let ty = ast::Fn::cast(declaration.node.clone())?.ret_type()?.ty()?;
+        fragment::ty(
+            &type_text(source, &declaration, ty.syntax(), &[]),
+            location.edition,
+        )
+        .ok()
+    })
+}
+
+/// Resolves a declared type constructor, including supplied aliases and their arguments.
+pub(crate) fn type_shape(
+    source: &Source,
+    location: &Location,
+    ty: &ast::Type,
+) -> Result<(String, Vec<String>)> {
+    let mut context = location.clone();
+    let mut ty = ty.clone();
+    let mut seen = HashSet::new();
+    loop {
+        let ast::Type::PathType(path_type) = &ty else {
+            return Err(format!("expected a return container, got `{ty}`").into());
+        };
+        let path = path_type.path().ok_or("type has no path")?;
+        let name = path_name(&path);
+        let arguments = path
+            .segment()
+            .and_then(|segment| segment.generic_arg_list())
+            .map(|arguments| {
+                arguments
+                    .generic_args()
+                    .map(|argument| type_text(source, &context, argument.syntax(), &[]))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !seen.insert((module_path(&context), ty.to_string())) {
+            return Err("cyclic return type alias".into());
+        }
+        if context
+            .ancestors()
+            .iter()
+            .flat_map(|node| node.children())
+            .filter_map(ast::GenericParamList::cast)
+            .flat_map(|list| list.generic_params())
+            .any(|parameter| {
+                parameter
+                    .syntax()
+                    .children()
+                    .find_map(ast::Name::cast)
+                    .is_some_and(|parameter| parameter.text() == name)
+            })
+        {
+            return Err(format!("return container `{name}` is a generic parameter").into());
+        }
+        let candidates = nominal_types(source, &context, &ty.to_string());
+        if let Some(declaration) = candidates.first() {
+            let Some(alias) = ast::TypeAlias::cast(declaration.node.clone()) else {
+                return Ok((qualified(declaration), arguments));
+            };
+            let parameters = alias
+                .syntax()
+                .children()
+                .find_map(ast::GenericParamList::cast)
+                .map(|list| list.generic_params().collect::<Vec<_>>())
+                .unwrap_or_default();
+            if arguments.len() > parameters.len() {
+                return Err("type alias has too many arguments".into());
+            }
+            let mut substitutions = Vec::new();
+            for (index, parameter) in parameters.iter().enumerate() {
+                let name = parameter
+                    .syntax()
+                    .children()
+                    .find(|node| matches!(node.kind(), SyntaxKind::NAME | SyntaxKind::LIFETIME))
+                    .ok_or("type alias parameter has no name")?
+                    .to_string();
+                let argument = arguments
+                    .get(index)
+                    .cloned()
+                    .or_else(|| match parameter {
+                        ast::GenericParam::TypeParam(parameter) => parameter
+                            .default_type()
+                            .map(|ty| type_text(source, declaration, ty.syntax(), &substitutions)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("type alias parameter `{name}` requires an argument"))?;
+                substitutions.push((name, argument));
+            }
+            let body = alias.ty().ok_or("type alias has no body")?;
+            let text = type_text(source, declaration, body.syntax(), &substitutions);
+            ty = fragment::ty(&text, location.edition)?;
+            context = declaration.clone();
+            continue;
+        }
+        let mut resolved = name.clone();
+        for (alias, target) in imports(&context) {
+            if resolved == alias
+                || resolved
+                    .strip_prefix(&alias)
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+            {
+                resolved = format!("{target}{}", &resolved[alias.len()..]);
+                break;
+            }
+        }
+        let resolved = resolved.trim_start_matches("::");
+        let canonical = match resolved {
+            "Result" => "core::result::Result",
+            "Option" => "core::option::Option",
+            name => name,
+        };
+        return Ok((canonical.to_owned(), arguments));
+    }
+}
+
+fn type_text(
+    source: &Source,
+    context: &Location,
+    node: &SyntaxNode,
+    substitutions: &[(String, String)],
+) -> String {
+    let imports = imports(context);
+    let generics = context
+        .ancestors()
+        .into_iter()
+        .flat_map(|node| node.children().collect::<Vec<_>>())
+        .filter_map(ast::GenericParamList::cast)
+        .flat_map(|list| list.generic_params().collect::<Vec<_>>())
+        .filter_map(|parameter| parameter.syntax().children().find_map(ast::Name::cast))
+        .map(|name| name.text().to_owned())
+        .collect::<HashSet<_>>();
+    let relatives = node
+        .descendants()
+        .filter_map(ast::Path::cast)
+        .filter(|path| {
+            path.segments().all(|segment| {
+                matches!(
+                    segment
+                        .name_ref()
+                        .map(|name| name.text().to_owned())
+                        .as_deref(),
+                    Some("self" | "super")
+                )
+            }) && !path
+                .syntax()
+                .parent()
+                .and_then(ast::Path::cast)
+                .is_some_and(|parent| {
+                    parent
+                        .segment()
+                        .and_then(|segment| segment.name_ref())
+                        .is_some_and(|name| matches!(name.text(), "self" | "super"))
+                })
+        })
+        .map(|path| {
+            let prefix = absolute(&format!("{}::", path_name(&path)), &module_path(context));
+            (
+                path.syntax().text_range(),
+                format!("crate::{prefix}").trim_end_matches("::").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    node.descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| {
+            if let Some((range, text)) = relatives
+                .iter()
+                .find(|(range, _)| range.contains_range(token.text_range()))
+            {
+                return if range.start() == token.text_range().start() {
+                    text.clone()
+                } else {
+                    String::new()
+                };
+            }
+            let name = token.text();
+            let segment = token
+                .parent()
+                .and_then(|node| node.parent())
+                .and_then(ast::PathSegment::cast);
+            let head = segment
+                .as_ref()
+                .is_some_and(|segment| segment.parent_path().qualifier().is_none());
+            let lifetime = token
+                .parent()
+                .is_some_and(|node| ast::Lifetime::can_cast(node.kind()));
+            if (head || lifetime)
+                && let Some((_, value)) = substitutions
+                    .iter()
+                    .find(|(parameter, _)| parameter == name)
+            {
+                return if head
+                    && segment.is_some_and(|segment| {
+                        segment
+                            .parent_path()
+                            .syntax()
+                            .parent()
+                            .is_some_and(|parent| ast::Path::can_cast(parent.kind()))
+                    }) {
+                    format!("<{value}>")
+                } else {
+                    value.clone()
+                };
+            }
+            if !head || generics.contains(name) || name == "Self" {
+                return name.to_owned();
+            }
+            if let Some((_, target)) = imports.iter().find(|(alias, _)| alias == name) {
+                if target.starts_with("self::") || target.starts_with("super::") {
+                    return format!("crate::{}", absolute(target, &module_path(context)));
+                }
+                return target.clone();
+            }
+            if let Some(declaration) = nominal_types(source, context, name).first() {
+                if declaration
+                    .node
+                    .ancestors()
+                    .any(|node| ast::StmtList::can_cast(node.kind()))
+                {
+                    return name.to_owned();
+                }
+                let full = [declaration.module.clone(), qualified(declaration)]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                return format!("crate::{full}");
+            }
+            name.to_owned()
+        })
+        .collect()
 }
 
 fn receiver_types(source: &Source, location: &Location, receiver: &ast::Expr) -> Vec<String> {

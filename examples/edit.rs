@@ -26,10 +26,23 @@ wrap! {
         }
 
         fn compute(&self, value: u32) -> u32 { self.value + value }
+
+        fn parse(&self, values: &[&str], output: &mut Vec<i32>) -> ParseResult<usize> {
+            'items: for text in values {
+                let n = text.parse::<i32>()?;
+                if n < 0 { continue 'items; }
+                if n == 0 { break 'items; }
+                if n == 99 { return Ok(output.len()); }
+                output.push(n);
+            }
+            output.push(100);
+            Ok(output.len())
+        }
     }
 }
 
 enum Mode { Local, Remote }
+type ParseResult<T> = Result<T, std::num::ParseIntError>;
 
 struct Size(u32, u32);
 impl Size {
@@ -75,6 +88,18 @@ fn main() {
     assert_eq!(state.sum(20, 3), 23);
     assert_eq!(state.route(Mode::Local), 15);
     assert_eq!(state.route(Mode::Remote), 6);
+    for (input, expected) in [
+        (&["1", "-1", "2", "0", "3"][..], vec![1, 2, 100]),
+        (&["1", "99", "3"], vec![1]),
+        (&["2", "3"], vec![2, 3, 100]),
+    ] {
+        let mut output = Vec::new();
+        assert_eq!(state.parse(input, &mut output).unwrap(), expected.len());
+        assert_eq!(output, expected);
+    }
+    let mut output = Vec::new();
+    assert!(state.parse(&["1", "invalid"], &mut output).is_err());
+    assert_eq!(output, [1]);
     assert_eq!(run(), 10);
     assert_eq!(identity(7), 7);
     let size = Size(7, 9);
@@ -117,6 +142,14 @@ fn main() {
     source
         .select(item("State::route").arm("Mode::Remote"))?
         .extract("fn remote(&self) -> u32", &[])?;
+    source
+        .select(item("State::parse").for_loop().body())?
+        .control_flow()
+        .propagate()
+        .extract(
+            "fn parse_item(&self, text: &str, output: &mut Vec<i32>)",
+            &["text", "output"],
+        )?;
     source
         .select(item("run").call("callback").argument("on_ready").closure())?
         .delegate("decorate", &["3"])?;
