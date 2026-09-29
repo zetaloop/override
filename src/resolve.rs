@@ -1258,9 +1258,8 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                     .children()
                     .find_map(ast::Name::cast)
                     .is_some_and(|field| names.iter().any(|name| field.text() == name))
-                    || field
-                        .children()
-                        .find_map(ast::NameRef::cast)
+                    || ast::RecordExprField::cast(field.clone())
+                        .and_then(|field| field.field_name())
                         .is_some_and(|field| names.iter().any(|name| field.text() == name))
             })
             .map(|field| location.at(field))

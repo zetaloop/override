@@ -88,7 +88,8 @@ fn compute(bias: u32, state: &State, value: u32) -> u32 {
 }
 
 fn main() {
-    let state = State { value: 4 };
+    let value = 3;
+    let state = State { value };
     assert_eq!(state.bias, 10);
     assert_eq!(state.total(), 7);
     assert_eq!(state.sum(20, 3), 23);
@@ -146,6 +147,9 @@ fn main() {
     source
         .select(item("main").record("State"))?
         .add_field("bias: 10")?;
+    source
+        .select(item("main").record("State").field("value"))?
+        .set_value("value + 1")?;
     source
         .select(item("State::total").region(root().binding("increment").after(), root().end()))?
         .extract(
