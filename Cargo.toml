@@ -3,7 +3,8 @@ name = "override"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
-description = "Structural Rust source editing and dependency build tools"
+description = "Symbol-based Rust source editing and dependency patching"
+repository = "https://github.com/zetaloop/override"
 license = "MIT"
 
 [dependencies]

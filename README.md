@@ -1,6 +1,6 @@
 # override
 
-Symbol-based Rust source editing for build scripts. Bridge crates prepare dependency sources, apply patches, and compile the result with their own Cargo configuration.
+Symbol-based Rust source editing and dependency patching. Bridge crates prepare dependency sources, apply patches, and compile the result with their own Cargo configuration.
 
 The crate is imported as `r#override`. Use `default-features = false` for the editor without Cargo integration.
 
