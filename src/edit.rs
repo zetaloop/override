@@ -881,8 +881,27 @@ impl Selected<'_> {
                 )
                 .into()
             } else {
+                let associated = location
+                    .at(function.syntax().clone())
+                    .ancestors()
+                    .into_iter()
+                    .skip(1)
+                    .find(|node| {
+                        matches!(
+                            node.kind(),
+                            SyntaxKind::ASSOC_ITEM_LIST
+                                | SyntaxKind::ITEM_LIST
+                                | SyntaxKind::STMT_LIST
+                        )
+                    })
+                    .is_some_and(|node| node.kind() == SyntaxKind::ASSOC_ITEM_LIST);
+                let path = if associated {
+                    format!("Self::{}", name.text())
+                } else {
+                    name.text().to_owned()
+                };
                 make::expr_call(
-                    make::expr_path(fragment::path(name.text(), edition)?),
+                    make::expr_path(fragment::path(&path, edition)?),
                     make::arg_list(inputs),
                 )
                 .into()
