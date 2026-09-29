@@ -52,6 +52,11 @@ impl Size {
 
 struct Pair(u8, u8);
 
+#[cfg(any())]
+mod imp { pub const VALUE: u32 = 0; }
+#[cfg(not(any()))]
+mod imp { pub const VALUE: u32 = 4; }
+
 mod callbacks {
     pub fn dispatch(on_error: impl FnOnce(u32) -> u32, on_ready: impl FnOnce(u32) -> u32) -> u32 {
         let _ = on_error;
@@ -105,6 +110,7 @@ fn main() {
     assert_eq!(output, [1]);
     assert_eq!(run(), 10);
     assert_eq!(identity(7), 7);
+    assert_eq!(imp::VALUE, 7);
     let size = Size(7, 9);
     assert_eq!(size.0, 7);
     assert_eq!(size.height(), 9_u64);
@@ -184,6 +190,13 @@ fn main() {
     source
         .select(item("Size::height"))?
         .set_return_type("u64")?;
+    source
+        .select(
+            item("imp")
+                .has(root().attribute("cfg(not(any()))"))
+                .item("VALUE"),
+        )?
+        .set_value("7")?;
     source.describe("Pair(left, right)")?;
     source
         .select(item("Pair").field("right"))?

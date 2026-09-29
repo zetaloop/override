@@ -274,15 +274,7 @@ pub(crate) fn types_equal(
     }
     let left = expand(source, context.clone(), left.clone());
     let right = expand(source, context.clone(), right.clone());
-    let tokens = |ty: &ast::Type| {
-        ty.syntax()
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .filter(|token| !token.kind().is_trivia())
-            .map(|token| (token.kind(), token.text().to_owned()))
-            .collect::<Vec<_>>()
-    };
-    left.syntax().kind() == right.syntax().kind() && tokens(&left) == tokens(&right)
+    fragment::equivalent(left.syntax(), right.syntax())
 }
 
 pub(crate) fn import_path(tree: &ast::UseTree) -> String {

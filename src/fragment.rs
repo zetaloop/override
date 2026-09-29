@@ -105,6 +105,16 @@ pub(crate) fn token_tree(
         .ok_or_else(|| "missing macro token tree".into())
 }
 
+pub(crate) fn equivalent(left: &SyntaxNode, right: &SyntaxNode) -> bool {
+    let tokens = |node: &SyntaxNode| {
+        node.descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !token.kind().is_trivia())
+            .map(|token| (token.kind(), token.text().to_owned()))
+    };
+    left.kind() == right.kind() && tokens(left).eq(tokens(right))
+}
+
 pub(crate) fn spelling(node: &SyntaxNode) -> String {
     node.descendants_with_tokens()
         .filter_map(|element| element.into_token())

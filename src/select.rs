@@ -21,6 +21,7 @@ enum Step {
     Field(String),
     Parameter(String),
     Argument(String),
+    Attribute(String),
     Body,
     Condition,
     Region(Boundary, Boundary),
@@ -46,7 +47,6 @@ enum Matcher {
     Arm(String),
     Binding(String),
     Macro(String),
-    Attribute(String),
     Variant(String),
     Generic(String),
     Kind(SyntaxKind),
@@ -102,7 +102,7 @@ impl Selector {
         self.find(Matcher::Macro(name.to_owned()))
     }
     pub fn attribute(self, name: &str) -> Self {
-        self.find(Matcher::Attribute(name.to_owned()))
+        self.step(Step::Attribute(name.to_owned()))
     }
     pub fn variant(self, name: &str) -> Self {
         self.find(Matcher::Variant(name.to_owned()))
@@ -232,6 +232,43 @@ impl Selector {
                         let mut argument = resolve::argument(source, scope, name)?;
                         argument.argument = name != "self";
                         next.push(argument);
+                    }
+                    Step::Attribute(text) => {
+                        if scope.region.is_some() {
+                            return Err("a region has no attributes".into());
+                        }
+                        let name = fragment::path(text, source.edition)
+                            .ok()
+                            .map(|path| resolve::path_text(&path));
+                        let expected = if name.is_none() {
+                            let parsed =
+                                fragment::file(&format!("#[{text}] struct S;"), source.edition)?;
+                            Some(
+                                fragment::one::<ast::Attr>(&parsed)?
+                                    .meta()
+                                    .ok_or("attribute has no content")?,
+                            )
+                        } else {
+                            None
+                        };
+                        for attribute in scope.node.children().filter_map(ast::Attr::cast) {
+                            let Some(meta) = attribute.meta() else {
+                                continue;
+                            };
+                            let matches = if let Some(name) = &name {
+                                meta.simple_name().is_some_and(|actual| actual == *name)
+                                    || meta
+                                        .path()
+                                        .is_some_and(|path| resolve::matches_path(&path, name))
+                            } else {
+                                expected.as_ref().is_some_and(|expected| {
+                                    fragment::equivalent(meta.syntax(), expected.syntax())
+                                })
+                            };
+                            if matches {
+                                next.push(scope.at(attribute.syntax().clone()));
+                            }
+                        }
                     }
                     Step::Body => {
                         if scope.region.is_some() {
@@ -373,8 +410,7 @@ impl Matcher {
             | Self::Call(name)
             | Self::Record(name)
             | Self::Pattern(name)
-            | Self::Macro(name)
-            | Self::Attribute(name) => *name = resolve::symbol(name, edition)?,
+            | Self::Macro(name) => *name = resolve::symbol(name, edition)?,
             Self::Implementation(ty) => {
                 *ty = fragment::spelling(fragment::ty(ty, edition)?.syntax())
             }
@@ -448,15 +484,6 @@ impl Matcher {
             Self::Macro(expected) => ast::MacroCall::cast(node.clone())
                 .and_then(|call| call.path())
                 .is_some_and(|path| resolve::matches_path(&path, expected)),
-            Self::Attribute(expected) => {
-                ast::AnyAttr::cast(node.clone()).is_some_and(|attribute| {
-                    attribute
-                        .syntax()
-                        .descendants()
-                        .find_map(ast::Path::cast)
-                        .is_some_and(|path| resolve::matches_path(&path, expected))
-                })
-            }
             Self::Variant(name) => ast::Variant::cast(node.clone())
                 .and_then(|variant| variant.name())
                 .is_some_and(|variant| variant.text() == name),
