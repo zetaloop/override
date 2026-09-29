@@ -5,6 +5,7 @@ mod region;
 mod resolve;
 mod select;
 mod source;
+mod symbol;
 
 #[cfg(feature = "build")]
 mod manifest;

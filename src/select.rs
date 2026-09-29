@@ -33,6 +33,7 @@ enum Step {
     Trait(String),
     Type(String),
     References(String),
+    Symbol(String),
     Declaration(Declaration),
 }
 
@@ -182,6 +183,9 @@ impl Selector {
     pub fn references(self, name: &str) -> Self {
         self.step(Step::References(name.to_owned()))
     }
+    pub fn symbol(self, name: &str) -> Self {
+        self.step(Step::Symbol(name.to_owned()))
+    }
     pub fn declared_by(self, declaration: &Declaration) -> Self {
         self.step(Step::Declaration(declaration.clone()))
     }
@@ -191,6 +195,9 @@ impl Selector {
         for step in &self.steps {
             let mut next = Vec::new();
             for scope in &current {
+                if scope.symbol.is_some() && !matches!(step, Step::Declaration(_)) {
+                    return Err("a symbol must be the final object in a selector".into());
+                }
                 match step {
                     Step::Find(matcher) => {
                         let matcher = matcher.prepare(source.edition)?;
@@ -377,12 +384,21 @@ impl Selector {
                             next.push(scope.clone());
                         }
                     }
+                    Step::Symbol(name) => {
+                        let path = fragment::path(name, source.edition)?;
+                        let mut location = scope.clone();
+                        location.symbol = Some(resolve::path_name(&path));
+                        location.declaration = None;
+                        next.push(location);
+                    }
                     Step::Declaration(declaration) => {
-                        if !matches!(
-                            scope.node.kind(),
-                            SyntaxKind::CALL_EXPR | SyntaxKind::METHOD_CALL_EXPR
-                        ) {
-                            return Err("declaration association requires a call".into());
+                        if scope.symbol.is_none()
+                            && !matches!(
+                                scope.node.kind(),
+                                SyntaxKind::CALL_EXPR | SyntaxKind::METHOD_CALL_EXPR
+                            )
+                        {
+                            return Err("declaration association requires a call or symbol".into());
                         }
                         let mut location = scope.clone();
                         location.declaration = Some(Box::new(declaration.location.clone()));

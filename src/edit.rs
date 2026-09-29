@@ -31,14 +31,11 @@ impl Selected<'_> {
                 if let Some(old) = tree.rename().and_then(|rename| rename.name()) {
                     editor.replace(old.syntax(), new.syntax());
                 } else {
+                    let parsed = fragment::file(&format!("use item as {new};"), edition)?;
+                    let rename = fragment::one::<ast::Rename>(&parsed)?;
                     editor.insert_all(
                         Position::last_child_of(node),
-                        vec![
-                            whitespace(" "),
-                            make::token(T![as]).into(),
-                            whitespace(" "),
-                            new.syntax().clone().into(),
-                        ],
+                        vec![whitespace(" "), rename.syntax().clone().into()],
                     );
                 }
             } else {
@@ -436,13 +433,16 @@ impl Selected<'_> {
                 return Ok(());
             }
             if let Some(field) = ast::RecordExprField::cast(node.clone()) {
-                if let Some(old) = field.expr() {
+                let old = field.expr().ok_or("field has no value")?;
+                if field.colon_token().is_some() {
                     editor.replace(old.syntax(), expression.syntax());
                 } else {
-                    let name = field.name_ref().ok_or("field has no name")?;
-                    editor.insert_all(
-                        Position::after(name.syntax()),
+                    let name = field.field_name().ok_or("field has no name")?;
+                    let original: SyntaxElement = old.syntax().clone().into();
+                    editor.replace_all(
+                        original.clone()..=original,
                         vec![
+                            make::name_ref(name.text()).syntax().clone().into(),
                             make::token(T![:]).into(),
                             whitespace(" "),
                             expression.syntax().clone().into(),
@@ -594,6 +594,13 @@ impl Selected<'_> {
     }
 
     pub fn redirect(self, target: &str) -> Result<()> {
+        if self.location.symbol.is_some() {
+            return crate::symbol::redirect(self, target);
+        }
+        if ast::RecordExprField::can_cast(self.location.node.kind()) {
+            fragment::path(target, self.source.edition)?;
+            return self.set_value(target);
+        }
         self.edit(|editor, node, edition| {
             let path = fragment::path(target, edition)?;
             if let Some(call) = ast::MethodCallExpr::cast(node.clone()) {
@@ -631,6 +638,32 @@ impl Selected<'_> {
                     make::expr_path(path)
                 };
                 editor.replace(original.syntax(), replacement.syntax());
+            } else if let Some(original) = ast::Path::cast(node.clone()) {
+                let arguments = original
+                    .segment()
+                    .and_then(|segment| segment.generic_arg_list());
+                let replacement = if path
+                    .segment()
+                    .and_then(|segment| segment.generic_arg_list())
+                    .is_none()
+                    && let Some(arguments) = arguments
+                {
+                    let mut suffix = arguments.to_string();
+                    if !suffix.starts_with("::") {
+                        suffix.insert_str(0, "::");
+                    }
+                    fragment::path(&format!("{target}{suffix}"), edition)?
+                } else {
+                    path
+                };
+                editor.replace(node, replacement.syntax());
+            } else if ast::IdentPat::can_cast(node.kind()) {
+                let parsed =
+                    fragment::expression(&format!("match () {{ {target} => () }}"), edition)?;
+                let pattern = fragment::one::<ast::MatchArm>(parsed.syntax())?
+                    .pat()
+                    .ok_or("arm has no pattern")?;
+                editor.replace(node, pattern.syntax());
             } else if let Some(call) = ast::MacroCall::cast(node.clone()) {
                 editor.replace(
                     call.path().ok_or("macro has no path")?.syntax(),
@@ -675,7 +708,7 @@ impl Selected<'_> {
                     editor.replace(branch, replacement);
                 }
             } else {
-                return Err("selected object is not a call, macro or import".into());
+                return Err("selected object has no redirectable path".into());
             }
             Ok(())
         })

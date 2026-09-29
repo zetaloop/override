@@ -5,7 +5,7 @@ use ra_ap_syntax::{
     syntax_editor::SyntaxEditor,
 };
 
-use crate::{Boundary, Result, Selector, flow, fragment};
+use crate::{Boundary, Result, Selector, flow, fragment, symbol};
 
 #[derive(Clone)]
 pub struct Source {
@@ -75,8 +75,13 @@ impl Source {
     }
 
     pub fn declaration(&self, selector: Selector) -> Result<Declaration> {
+        let location = self.locate(&selector)?;
         Ok(Declaration {
-            location: self.locate(&selector)?,
+            location: if location.symbol.is_some() {
+                *location.declaration.ok_or("symbol has no declaration")?
+            } else {
+                location
+            },
         })
     }
 
@@ -85,7 +90,13 @@ impl Source {
         root.module = self.module.clone();
         let matches = selector.resolve(self, &[root])?;
         match matches.as_slice() {
-            [location] => Ok(location.clone()),
+            [location] => {
+                let mut location = location.clone();
+                if location.symbol.is_some() {
+                    location.declaration = Some(Box::new(symbol::declaration(self, &location)?));
+                }
+                Ok(location)
+            }
             [] => Err(format!("no target matches {selector:?}").into()),
             _ => Err(format!(
                 "ambiguous target {selector:?}: {}",
@@ -132,6 +143,7 @@ impl Declaration {
                 parents: Vec::new(),
                 region: None,
                 declaration: None,
+                symbol: None,
                 argument: false,
             },
         })
@@ -155,7 +167,15 @@ impl Selected<'_> {
 
     pub fn declaration(&self) -> Declaration {
         Declaration {
-            location: self.location.clone(),
+            location: if self.location.symbol.is_some() {
+                *self
+                    .location
+                    .declaration
+                    .clone()
+                    .expect("selected symbol has a declaration")
+            } else {
+                self.location.clone()
+            },
         }
     }
 
@@ -165,6 +185,9 @@ impl Selected<'_> {
     ) -> Result<T> {
         if self.location.region.is_some() {
             return Err("a region supports extraction and delegation".into());
+        }
+        if self.location.symbol.is_some() {
+            return Err("a symbol selection supports redirection".into());
         }
         if self.flow != flow::Options::default() {
             return Err("control-flow options require extraction".into());
@@ -203,6 +226,7 @@ pub(crate) struct Location {
     pub parents: Vec<MacroFrame>,
     pub region: Option<Vec<SyntaxElement>>,
     pub declaration: Option<Box<Location>>,
+    pub symbol: Option<String>,
     pub argument: bool,
 }
 
@@ -216,6 +240,7 @@ impl Location {
             parents: Vec::new(),
             region: None,
             declaration: None,
+            symbol: None,
             argument: false,
         }
     }
@@ -235,6 +260,7 @@ impl Location {
             declaration: (node == self.node)
                 .then(|| self.declaration.clone())
                 .flatten(),
+            symbol: (node == self.node).then(|| self.symbol.clone()).flatten(),
             argument: self.argument && node == self.node,
             node,
             root,
@@ -344,6 +370,7 @@ impl Location {
                 parents,
                 region: None,
                 declaration: None,
+                symbol: None,
                 argument: false,
             }
             .visit(nodes);

@@ -191,6 +191,10 @@ fn main() {
         .select(item("Size::height"))?
         .set_return_type("u64")?;
     source
+        .select(root().symbol("Size"))?
+        .redirect("Dimensions")?;
+    source.select(item("Size"))?.rename("Dimensions")?;
+    source
         .select(
             item("imp")
                 .has(root().attribute("cfg(not(any()))"))

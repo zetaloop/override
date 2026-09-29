@@ -109,7 +109,7 @@ pub(crate) fn path_text(path: &ast::Path) -> String {
     format!("{prefix}{}", parts.join("::"))
 }
 
-fn path_name(path: &ast::Path) -> String {
+pub(crate) fn path_name(path: &ast::Path) -> String {
     let mut parts = path
         .qualifier()
         .map(|qualifier| path_name(&qualifier))
@@ -191,7 +191,7 @@ pub(crate) fn node_type(node: &SyntaxNode) -> Option<ast::Type> {
     ast::Type::cast(node.clone()).or_else(|| node.children().find_map(ast::Type::cast))
 }
 
-fn declarations(source: &Source) -> Vec<(String, Location)> {
+pub(crate) fn declarations(source: &Source) -> Vec<(String, Location)> {
     std::iter::once((source.module.as_str(), &source.root, source.edition))
         .chain(
             source
@@ -330,7 +330,7 @@ fn imports(location: &Location) -> Vec<(String, String)> {
     output
 }
 
-fn module_path(location: &Location) -> String {
+pub(crate) fn module_path(location: &Location) -> String {
     let mut names = location
         .ancestors()
         .into_iter()
@@ -345,7 +345,7 @@ fn module_path(location: &Location) -> String {
     names.join("::")
 }
 
-fn absolute(name: &str, module: &str) -> String {
+pub(crate) fn absolute(name: &str, module: &str) -> String {
     if let Some(name) = name
         .strip_prefix("crate::")
         .or_else(|| name.strip_prefix("::"))
