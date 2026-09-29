@@ -5,7 +5,7 @@ use ra_ap_syntax::{
     syntax_editor::SyntaxEditor,
 };
 
-use crate::{Result, Selector, flow, fragment};
+use crate::{Boundary, Result, Selector, flow, fragment};
 
 #[derive(Clone)]
 pub struct Source {
@@ -70,6 +70,7 @@ impl Source {
             source: self,
             location,
             flow: flow::Options::default(),
+            position: None,
         })
     }
 
@@ -141,6 +142,7 @@ pub struct Selected<'a> {
     pub(crate) source: &'a mut Source,
     pub(crate) location: Location,
     pub(crate) flow: flow::Options,
+    pub(crate) position: Option<Boundary>,
 }
 
 impl Selected<'_> {
@@ -166,6 +168,9 @@ impl Selected<'_> {
         }
         if self.flow != flow::Options::default() {
             return Err("control-flow options require extraction".into());
+        }
+        if self.position.is_some() {
+            return Err("an insertion position requires adding a member".into());
         }
         let (editor, _) = SyntaxEditor::new(self.location.root.clone());
         let result = operation(&editor, &self.location.node, self.source.edition)?;

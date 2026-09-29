@@ -7,10 +7,23 @@ use ra_ap_syntax::{
 };
 
 use crate::{
-    Result, Selected, flow, fragment, region, resolve, select::arguments, source::Location,
+    Boundary, Result, Selected, flow, fragment, region, region::Edge, resolve, select::arguments,
+    source::Location,
 };
 
 impl Selected<'_> {
+    pub fn at(mut self, boundary: Boundary) -> Self {
+        self.position = Some(boundary);
+        self
+    }
+
+    fn insertion(&mut self) -> Result<Option<(Location, Edge)>> {
+        self.position
+            .take()
+            .map(|boundary| boundary.target(self.source, &self.location))
+            .transpose()
+    }
+
     pub fn rename(self, name: &str) -> Result<()> {
         self.edit(|editor, node, edition| {
             let new = fragment::name(name, edition)?;
@@ -74,19 +87,36 @@ impl Selected<'_> {
         })
     }
 
-    pub fn add_attribute(self, attribute: &str) -> Result<()> {
+    pub fn add_attribute(mut self, attribute: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let root = fragment::file(&format!("{attribute}\nstruct S;"), edition)?;
             let attribute = fragment::one::<ast::AnyAttr>(&root)?;
+            let position = if let Some(position) = &position {
+                let index = insertion(node, position)?;
+                let contents = node.children_with_tokens().collect::<Vec<_>>();
+                if contents[..index].iter().any(|element| {
+                    !element.kind().is_trivia() && !ast::AnyAttr::can_cast(element.kind())
+                }) {
+                    return Err("attribute insertion must precede the declaration header".into());
+                }
+                contents.get(index).map_or_else(
+                    || Position::last_child_of(node),
+                    |element| Position::before(element.clone()),
+                )
+            } else {
+                Position::first_child_of(node)
+            };
             editor.insert_all(
-                Position::first_child_of(node),
+                position,
                 vec![attribute.syntax().clone().into(), whitespace("\n")],
             );
             Ok(())
         })
     }
 
-    pub fn add_field(self, declaration: &str) -> Result<()> {
+    pub fn add_field(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let list = node
                 .children()
@@ -116,11 +146,12 @@ impl Selected<'_> {
                 }
                 _ => unreachable!(),
             };
-            append(editor, &list, field.into())
+            append(editor, &list, field.into(), position.as_ref())
         })
     }
 
-    pub fn add_variant(self, declaration: &str) -> Result<()> {
+    pub fn add_variant(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let list = ast::Enum::cast(node.clone())
                 .and_then(|node| node.variant_list())
@@ -133,11 +164,32 @@ impl Selected<'_> {
                     .syntax()
                     .clone()
                     .into(),
+                position.as_ref(),
             )
         })
     }
 
-    pub fn add_parameter(self, declaration: &str) -> Result<()> {
+    pub fn add_arm(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
+        self.edit(|editor, node, edition| {
+            let list = ast::MatchExpr::cast(node.clone())
+                .and_then(|expression| expression.match_arm_list())
+                .ok_or("selected object is not a match")?;
+            let parsed = fragment::expression(&format!("match () {{ {declaration} }}"), edition)?;
+            append(
+                editor,
+                list.syntax(),
+                fragment::one::<ast::MatchArm>(parsed.syntax())?
+                    .syntax()
+                    .clone()
+                    .into(),
+                position.as_ref(),
+            )
+        })
+    }
+
+    pub fn add_parameter(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let list = node
                 .children()
@@ -153,7 +205,7 @@ impl Selected<'_> {
             let [parameter] = parameters.as_slice() else {
                 return Err("expected one parameter".into());
             };
-            if ast::SelfParam::can_cast(parameter.kind()) {
+            if ast::SelfParam::can_cast(parameter.kind()) && position.is_none() {
                 if list.self_param().is_some() {
                     return Err("function already has a receiver".into());
                 }
@@ -165,12 +217,18 @@ impl Selected<'_> {
                 editor.insert_all(Position::after(open), elements);
                 Ok(())
             } else {
-                append(editor, list.syntax(), parameter.clone().into())
+                append(
+                    editor,
+                    list.syntax(),
+                    parameter.clone().into(),
+                    position.as_ref(),
+                )
             }
         })
     }
 
-    pub fn add_generic(self, declaration: &str) -> Result<()> {
+    pub fn add_generic(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let function = fragment::signature(&format!("fn f<{declaration}>()"), edition)?;
             let list = function
@@ -183,12 +241,20 @@ impl Selected<'_> {
                 return Err("expected one generic parameter".into());
             };
             if let Some(existing) = node.children().find_map(ast::GenericParamList::cast) {
-                append(editor, existing.syntax(), parameter.syntax().clone().into())
+                append(
+                    editor,
+                    existing.syntax(),
+                    parameter.syntax().clone().into(),
+                    position.as_ref(),
+                )
             } else {
                 let name = node
                     .children()
                     .find_map(ast::Name::cast)
                     .ok_or("selected object has no name")?;
+                if let Some(position) = &position {
+                    insertion(node, position)?;
+                }
                 editor.insert(Position::after(name.syntax()), list.syntax());
                 Ok(())
             }
@@ -401,7 +467,8 @@ impl Selected<'_> {
         })
     }
 
-    pub fn add_argument(self, value: &str) -> Result<()> {
+    pub fn add_argument(mut self, value: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let list = arguments(node).ok_or("selected object is not a call")?;
             append(
@@ -411,6 +478,7 @@ impl Selected<'_> {
                     .syntax()
                     .clone()
                     .into(),
+                position.as_ref(),
             )
         })
     }
@@ -483,18 +551,20 @@ impl Selected<'_> {
         })
     }
 
-    pub fn add_use(self, declaration: &str) -> Result<()> {
+    pub fn add_use(mut self, declaration: &str) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let parsed = fragment::file(declaration, edition)?;
             let import = fragment::one::<ast::Use>(&parsed)?;
             if parsed.children().count() != 1 {
                 return Err("expected one use declaration".into());
             }
-            insert_item(editor, node, import.syntax())
+            insert_item(editor, node, import.syntax(), position.as_ref())
         })
     }
 
-    pub fn mount_module(self, declaration: &str, path: impl AsRef<Path>) -> Result<()> {
+    pub fn mount_module(mut self, declaration: &str, path: impl AsRef<Path>) -> Result<()> {
+        let position = self.insertion()?;
         self.edit(|editor, node, edition| {
             let path = path.as_ref().to_str().ok_or("module path is not UTF-8")?;
             let parsed = fragment::file(&format!("#[path = {path:?}]\n{declaration};"), edition)?;
@@ -502,7 +572,7 @@ impl Selected<'_> {
             if parsed.children().count() != 1 {
                 return Err("expected one module declaration".into());
             }
-            insert_item(editor, node, module.syntax())
+            insert_item(editor, node, module.syntax(), position.as_ref())
         })
     }
 
@@ -729,6 +799,7 @@ impl Selected<'_> {
             source: &mut source,
             location: self.location,
             flow: flow::Options::default(),
+            position: self.position,
         }
         .edit(|editor, node, edition| {
             let target = ast::MatchArm::cast(node.clone())
@@ -880,6 +951,7 @@ impl Selected<'_> {
             source: &mut source,
             location,
             flow: flow::Options::default(),
+            position: None,
         }
         .edit(|editor, node, _| {
             let indentation = ast::edit::IndentLevel::from_node(node);
@@ -916,6 +988,7 @@ impl Selected<'_> {
                 source: &mut source,
                 location,
                 flow: flow::Options::default(),
+                position: None,
             }
             .edit(|editor, node, _| {
                 let indentation = ast::edit::IndentLevel::from_node(node);
@@ -968,30 +1041,99 @@ fn header(node: &SyntaxNode) -> Result<SyntaxElement> {
         .ok_or_else(|| "declaration has no header".into())
 }
 
-fn append(editor: &SyntaxEditor, list: &SyntaxNode, element: SyntaxElement) -> Result<()> {
+fn insertion(list: &SyntaxNode, (location, edge): &(Location, Edge)) -> Result<usize> {
     let contents = list.children_with_tokens().collect::<Vec<_>>();
-    let end = contents
+    if matches!(edge, Edge::Start | Edge::End) {
+        if location.region.is_none()
+            && (location.node == *list
+                || list.parent().as_ref() == Some(&location.node)
+                || crate::select::body(&location.node)
+                    .is_some_and(|body| Some(body) == list.parent()))
+        {
+            return Ok(if matches!(edge, Edge::Start) {
+                usize::from(
+                    contents
+                        .first()
+                        .is_some_and(|element| matches!(element.kind(), T!['{'] | T!['('] | T![<])),
+                )
+            } else {
+                contents.len()
+                    - usize::from(
+                        contents.last().is_some_and(|element| {
+                            matches!(element.kind(), T!['}'] | T![')'] | T![>])
+                        }),
+                    )
+            });
+        }
+        return Err("insertion boundary does not belong to the member list".into());
+    }
+    let after = matches!(edge, Edge::After);
+    let element = if let Some(region) = &location.region {
+        if after { region.last() } else { region.first() }
+            .cloned()
+            .ok_or("empty insertion boundary")?
+    } else {
+        location.node.clone().into()
+    };
+    let index = contents
         .iter()
-        .position(|element| element.kind() == T![..])
-        .unwrap_or(
-            contents
-                .len()
-                .checked_sub(1)
-                .ok_or("list has no delimiter")?,
-        );
+        .position(|candidate| candidate == &element)
+        .ok_or("insertion boundary is not a member of the selected object")?;
+    if !after {
+        return Ok(index);
+    }
+    Ok(contents
+        .iter()
+        .enumerate()
+        .skip(index + 1)
+        .find(|(_, element)| !element.kind().is_trivia() && element.kind() != T![,])
+        .map_or(contents.len(), |(index, _)| index))
+}
+
+fn append(
+    editor: &SyntaxEditor,
+    list: &SyntaxNode,
+    element: SyntaxElement,
+    position: Option<&(Location, Edge)>,
+) -> Result<()> {
+    let contents = list.children_with_tokens().collect::<Vec<_>>();
+    let end = if let Some(position) = position {
+        insertion(list, position)?
+    } else {
+        contents
+            .iter()
+            .position(|element| element.kind() == T![..])
+            .unwrap_or(
+                contents
+                    .len()
+                    .checked_sub(1)
+                    .ok_or("list has no delimiter")?,
+            )
+    };
     let before = &contents[..end];
     let last = before
         .iter()
         .rposition(|element| !element.kind().is_trivia())
         .ok_or("list has no opening delimiter")?;
     let occupied = before.iter().any(|element| element.as_node().is_some());
-    let separator = occupied && before[last].kind() != T![,];
+    let comma = |element: &SyntaxElement| {
+        element.kind() == T![,]
+            || element
+                .as_node()
+                .and_then(SyntaxNode::last_token)
+                .is_some_and(|token| token.kind() == T![,])
+    };
+    let separator = occupied && !comma(&before[last]);
     let spacing = if list.to_string().contains('\n') {
         format!("\n{}", ast::edit::IndentLevel::from_node(list) + 1)
     } else {
         " ".to_owned()
     };
-    let mut elements = vec![whitespace(&spacing), element, make::token(T![,]).into()];
+    let trailing = !comma(&element);
+    let mut elements = vec![whitespace(&spacing), element];
+    if trailing {
+        elements.push(make::token(T![,]).into());
+    }
     if before[last + 1..]
         .iter()
         .any(|element| element.kind() == SyntaxKind::COMMENT)
@@ -1013,14 +1155,17 @@ fn append(editor: &SyntaxEditor, list: &SyntaxNode, element: SyntaxElement) -> R
     Ok(())
 }
 
-fn insert_item(editor: &SyntaxEditor, node: &SyntaxNode, item: &SyntaxNode) -> Result<()> {
-    if node.kind() == SyntaxKind::SOURCE_FILE {
-        editor.insert_all(
-            Position::last_child_of(node),
-            vec![whitespace("\n"), item.clone().into(), whitespace("\n")],
-        );
+fn insert_item(
+    editor: &SyntaxEditor,
+    node: &SyntaxNode,
+    item: &SyntaxNode,
+    position: Option<&(Location, Edge)>,
+) -> Result<()> {
+    let list = if node.kind() == SyntaxKind::SOURCE_FILE {
+        node.clone()
     } else {
-        let list = node
+        crate::select::body(node)
+            .unwrap_or_else(|| node.clone())
             .children()
             .find(|node| {
                 matches!(
@@ -1028,15 +1173,25 @@ fn insert_item(editor: &SyntaxEditor, node: &SyntaxNode, item: &SyntaxNode) -> R
                     SyntaxKind::ITEM_LIST | SyntaxKind::ASSOC_ITEM_LIST | SyntaxKind::STMT_LIST
                 )
             })
-            .ok_or("selected object cannot contain items")?;
-        let close = list
-            .last_token()
-            .ok_or("item list has no closing delimiter")?;
-        editor.insert_all(
-            Position::before(close),
-            vec![whitespace("\n"), item.clone().into(), whitespace("\n")],
-        );
-    }
+            .ok_or("selected object cannot contain items")?
+    };
+    let position = if let Some(position) = position {
+        let index = insertion(&list, position)?;
+        list.children_with_tokens()
+            .nth(index)
+            .map_or_else(|| Position::last_child_of(&list), Position::before)
+    } else if list.kind() == SyntaxKind::SOURCE_FILE {
+        Position::last_child_of(&list)
+    } else {
+        Position::before(
+            list.last_token()
+                .ok_or("item list has no closing delimiter")?,
+        )
+    };
+    editor.insert_all(
+        position,
+        vec![whitespace("\n"), item.clone().into(), whitespace("\n")],
+    );
     Ok(())
 }
 

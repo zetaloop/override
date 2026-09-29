@@ -390,6 +390,7 @@ pub(crate) fn extract(
             source: &mut body_source,
             location,
             flow: Options::default(),
+            position: None,
         }
         .edit(|editor, node, edition| {
             let value = ast::ReturnExpr::cast(node.clone())

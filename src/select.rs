@@ -118,6 +118,9 @@ impl Selector {
     pub fn if_expr(self) -> Self {
         self.find(Matcher::Kind(SyntaxKind::IF_EXPR))
     }
+    pub fn match_expr(self) -> Self {
+        self.find(Matcher::Kind(SyntaxKind::MATCH_EXPR))
+    }
     pub fn closure(self) -> Self {
         self.find(Matcher::Kind(SyntaxKind::CLOSURE_EXPR))
     }
@@ -365,11 +368,19 @@ impl Matcher {
             | Self::Import(name)
             | Self::Call(name)
             | Self::Record(name)
-            | Self::Arm(name)
             | Self::Macro(name)
             | Self::Attribute(name) => *name = resolve::symbol(name, edition)?,
             Self::Implementation(ty) => {
                 *ty = fragment::spelling(fragment::ty(ty, edition)?.syntax())
+            }
+            Self::Arm(pattern) => {
+                let parsed =
+                    fragment::expression(&format!("match () {{ {pattern} => () }}"), edition)?;
+                let arm = fragment::one::<ast::MatchArm>(parsed.syntax())?;
+                if arm.guard().is_some() {
+                    return Err("an arm query requires a pattern".into());
+                }
+                *pattern = fragment::spelling(arm.pat().ok_or("arm has no pattern")?.syntax());
             }
             Self::Binding(name) | Self::Variant(name) => {
                 *name = fragment::name(name, edition)?.text().to_string()
@@ -412,11 +423,12 @@ impl Matcher {
             Self::Arm(expected) => ast::MatchArm::cast(node.clone())
                 .and_then(|arm| arm.pat())
                 .is_some_and(|pattern| {
-                    pattern
-                        .syntax()
-                        .descendants()
-                        .filter_map(ast::Path::cast)
-                        .any(|path| resolve::matches_path(&path, expected))
+                    fragment::spelling(pattern.syntax()) == *expected
+                        || pattern
+                            .syntax()
+                            .descendants()
+                            .filter_map(ast::Path::cast)
+                            .any(|path| resolve::matches_path(&path, expected))
                 }),
             Self::Binding(name) => ast::IdentPat::cast(node.clone())
                 .and_then(|binding| binding.name())

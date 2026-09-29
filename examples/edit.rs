@@ -21,6 +21,7 @@ wrap! {
             match mode {
                 Mode::Local => self.compute(1),
                 Mode::Remote => self.compute(2),
+                _ => 0,
             }
         }
 
@@ -40,7 +41,7 @@ wrap! {
     }
 }
 
-enum Mode { Local, Remote }
+enum Mode { Local, Remote, Unknown }
 type ParseResult<T> = Result<T, std::num::ParseIntError>;
 
 struct Size(u32, u32);
@@ -87,6 +88,8 @@ fn main() {
     assert_eq!(state.sum(20, 3), 23);
     assert_eq!(state.route(Mode::Local), 15);
     assert_eq!(state.route(Mode::Remote), 6);
+    assert_eq!(state.route(Mode::External), 7);
+    assert_eq!(state.route(Mode::Unknown), 0);
     for (input, expected) in [
         (&["1", "-1", "2", "0", "3"][..], vec![1, 2, 100]),
         (&["1", "99", "3"], vec![1]),
@@ -111,7 +114,22 @@ fn main() {
         Edition::Edition2024,
     )?;
 
-    source.select(item("State"))?.add_field("bias: u32")?;
+    source
+        .select(item("State"))?
+        .at(root().field("value").after())
+        .add_field("bias: u32")?;
+    source
+        .select(item("Mode"))?
+        .at(root().variant("Remote").before())
+        .add_variant("External")?;
+    source
+        .select(
+            item("State::route")
+                .match_expr()
+                .has(root().arm("Mode::Local")),
+        )?
+        .at(root().arm("_").before())
+        .add_arm("Mode::External => self.compute(3)")?;
     source
         .select(item("State").field("value"))?
         .set_visibility("pub(crate)")?;

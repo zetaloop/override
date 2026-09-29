@@ -21,14 +21,18 @@ impl Boundary {
         Self { selector, edge }
     }
 
-    fn resolve(&self, source: &Source, scope: &Location) -> Result<(Location, TextSize)> {
+    pub(crate) fn target(&self, source: &Source, scope: &Location) -> Result<(Location, Edge)> {
         let matches = self.selector.resolve(source, std::slice::from_ref(scope))?;
         let [location] = matches.as_slice() else {
-            return Err(
-                format!("region boundary {self:?} matches {} objects", matches.len()).into(),
-            );
+            return Err(format!("boundary {self:?} matches {} objects", matches.len()).into());
         };
-        let after = matches!(self.edge, Edge::After | Edge::End);
+        Ok((location.clone(), self.edge))
+    }
+
+    fn resolve(&self, source: &Source, scope: &Location) -> Result<(Location, TextSize)> {
+        let (location, boundary) = self.target(source, scope)?;
+        let location = &location;
+        let after = matches!(boundary, Edge::After | Edge::End);
         if let Some(region) = &location.region {
             let first = region.first().ok_or("selected region is empty")?;
             let last = region.last().ok_or("selected region is empty")?;
