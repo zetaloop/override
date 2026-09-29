@@ -1126,27 +1126,34 @@ fn insertion(list: &SyntaxNode, (location, edge): &(Location, Edge)) -> Result<u
                 || crate::select::body(&location.node)
                     .is_some_and(|body| Some(body) == list.parent()))
         {
-            return Ok(if matches!(edge, Edge::Start) {
-                usize::from(
+            return Ok(
+                if matches!(edge, Edge::Start) && list.kind() == SyntaxKind::SOURCE_FILE {
                     contents
-                        .first()
-                        .is_some_and(|element| matches!(element.kind(), T!['{'] | T!['('] | T![<])),
-                )
-            } else {
-                let tail = ast::StmtList::cast(list.clone())
-                    .and_then(|list| list.tail_expr())
-                    .and_then(|tail| {
-                        contents
-                            .iter()
-                            .position(|element| element.as_node() == Some(tail.syntax()))
-                    });
-                tail.unwrap_or_else(|| {
-                    contents.len()
-                        - usize::from(contents.last().is_some_and(|element| {
-                            matches!(element.kind(), T!['}'] | T![')'] | T![>])
-                        }))
-                })
-            });
+                        .iter()
+                        .position(|element| ast::Item::can_cast(element.kind()))
+                        .unwrap_or(contents.len())
+                } else if matches!(edge, Edge::Start) {
+                    usize::from(
+                        contents.first().is_some_and(|element| {
+                            matches!(element.kind(), T!['{'] | T!['('] | T![<])
+                        }),
+                    )
+                } else {
+                    let tail = ast::StmtList::cast(list.clone())
+                        .and_then(|list| list.tail_expr())
+                        .and_then(|tail| {
+                            contents
+                                .iter()
+                                .position(|element| element.as_node() == Some(tail.syntax()))
+                        });
+                    tail.unwrap_or_else(|| {
+                        contents.len()
+                            - usize::from(contents.last().is_some_and(|element| {
+                                matches!(element.kind(), T!['}'] | T![')'] | T![>])
+                            }))
+                    })
+                },
+            );
         }
         return Err("insertion boundary does not belong to the member list".into());
     }
