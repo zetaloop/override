@@ -17,7 +17,7 @@ fn main() -> Result<()> {
 }
 ```
 
-[examples/edit.rs](examples/edit.rs) demonstrates macro editing, declaration lookup, extraction, control-flow propagation and delegation. It prints Rust source that can be compiled and run.
+[examples/edit.rs](examples/edit.rs) adds a repeat command to a dispatcher by extracting and reusing its output logic. It prints a Rust program accepting a message and repeat count.
 
 Regions depend on source order: new upstream code between their anchors becomes part of the selection. Prefer whole functions, loops or branches when possible. Extraction creates a new scope; the supplied signature and arguments must account for ownership and local destruction.
 
