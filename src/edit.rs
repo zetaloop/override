@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ra_ap_syntax::{
     AstNode, SyntaxElement, SyntaxKind, SyntaxNode, T,
-    ast::{self, HasGenericArgs, HasName, HasVisibility, make},
+    ast::{self, HasGenericArgs, HasName, HasVisibility, edit::AstNodeEdit, make},
     syntax_editor::{Position, Removable, SyntaxEditor},
 };
 
@@ -104,9 +104,13 @@ impl Selected<'_> {
             } else {
                 Position::first_child_of(node)
             };
+            let indentation = ast::edit::IndentLevel::from_node(node);
             editor.insert_all(
                 position,
-                vec![attribute.syntax().clone().into(), whitespace("\n")],
+                vec![
+                    attribute.indent(indentation).syntax().clone().into(),
+                    whitespace(&format!("\n{indentation}")),
+                ],
             );
             Ok(())
         })
@@ -787,6 +791,7 @@ impl Selected<'_> {
                     ast::Fn::cast(node.clone())
                         .and_then(|function| function.body())
                         .ok_or("function has no body")?
+                        .reset_indent()
                         .syntax()
                         .to_string()
                 };
@@ -822,10 +827,12 @@ impl Selected<'_> {
                     let body = ast::Fn::cast(node.clone())
                         .and_then(|function| function.body())
                         .ok_or("function has no body")?;
-                    editor.replace(
-                        body.syntax(),
-                        make::block_expr(std::iter::empty(), Some(call)).syntax(),
-                    );
+                    let replacement = make::block_expr(
+                        std::iter::empty(),
+                        Some(call.indent(ast::edit::IndentLevel(1))),
+                    )
+                    .indent(body.indent_level());
+                    editor.replace(body.syntax(), replacement.syntax());
                 }
             } else {
                 return Err("delegation requires a call, closure or function".into());
