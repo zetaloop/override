@@ -150,6 +150,23 @@ impl Selected<'_> {
         })
     }
 
+    pub fn add_rest(self) -> Result<()> {
+        self.edit(|editor, node, _| {
+            let list = ast::RecordPat::cast(node.clone())
+                .and_then(|pattern| pattern.record_pat_field_list())
+                .ok_or("selected object is not a record pattern")?;
+            if list.rest_pat().is_some() {
+                return Ok(());
+            }
+            append(
+                editor,
+                list.syntax(),
+                make::rest_pat().syntax().clone().into(),
+                None,
+            )
+        })
+    }
+
     pub fn add_variant(mut self, declaration: &str) -> Result<()> {
         let position = self.insertion()?;
         self.edit(|editor, node, edition| {
@@ -1129,7 +1146,7 @@ fn append(
     } else {
         " ".to_owned()
     };
-    let trailing = !comma(&element);
+    let trailing = !comma(&element) && element.kind() != SyntaxKind::REST_PAT;
     let mut elements = vec![whitespace(&spacing), element];
     if trailing {
         elements.push(make::token(T![,]).into());

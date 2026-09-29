@@ -42,6 +42,7 @@ enum Matcher {
     Implementation(String),
     Call(String),
     Record(String),
+    Pattern(String),
     Arm(String),
     Binding(String),
     Macro(String),
@@ -87,6 +88,9 @@ impl Selector {
     }
     pub fn record(self, name: &str) -> Self {
         self.find(Matcher::Record(name.to_owned()))
+    }
+    pub fn pattern(self, name: &str) -> Self {
+        self.find(Matcher::Pattern(name.to_owned()))
     }
     pub fn arm(self, variant: &str) -> Self {
         self.find(Matcher::Arm(variant.to_owned()))
@@ -368,6 +372,7 @@ impl Matcher {
             | Self::Import(name)
             | Self::Call(name)
             | Self::Record(name)
+            | Self::Pattern(name)
             | Self::Macro(name)
             | Self::Attribute(name) => *name = resolve::symbol(name, edition)?,
             Self::Implementation(ty) => {
@@ -419,6 +424,13 @@ impl Matcher {
             }),
             Self::Record(expected) => ast::RecordExpr::cast(node.clone())
                 .and_then(|record| record.path())
+                .is_some_and(|path| resolve::matches_path(&path, expected)),
+            Self::Pattern(expected) => ast::RecordPat::cast(node.clone())
+                .and_then(|pattern| pattern.path())
+                .or_else(|| {
+                    ast::TupleStructPat::cast(node.clone()).and_then(|pattern| pattern.path())
+                })
+                .or_else(|| ast::PathPat::cast(node.clone()).and_then(|pattern| pattern.path()))
                 .is_some_and(|path| resolve::matches_path(&path, expected)),
             Self::Arm(expected) => ast::MatchArm::cast(node.clone())
                 .and_then(|arm| arm.pat())

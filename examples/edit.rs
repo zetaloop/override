@@ -12,7 +12,8 @@ wrap! {
 
     impl State {
         fn total(&self) -> u32 {
-            let seed = self.value;
+            let State { value } = *self;
+            let seed = value;
             let increment = 2;
             seed + increment
         }
@@ -118,6 +119,9 @@ fn main() {
         .select(item("State"))?
         .at(root().field("value").after())
         .add_field("bias: u32")?;
+    source
+        .select(item("State::total").pattern("State"))?
+        .add_rest()?;
     source
         .select(item("Mode"))?
         .at(root().variant("Remote").before())
