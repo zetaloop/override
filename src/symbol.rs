@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ra_ap_syntax::{
     AstNode, SyntaxKind, SyntaxNode, ast,
-    ast::{HasLoopBody, HasName},
+    ast::{HasGenericArgs, HasLoopBody, HasName},
 };
 
 use crate::{Result, Selected, Source, flow, fragment, resolve, source::Location};
@@ -102,6 +102,51 @@ fn context(location: &Location) -> Location {
         .children()
         .find(|node| matches!(node.kind(), SyntaxKind::ITEM_LIST | SyntaxKind::STMT_LIST))
         .map_or_else(|| location.clone(), |node| location.at(node))
+}
+
+fn self_type(context: &Location) -> Option<(Location, ast::Path)> {
+    let mut item = false;
+    for node in context.ancestors() {
+        let owner = context.at(node.clone());
+        if let Some(implementation) = ast::Impl::cast(node.clone()) {
+            let ast::Type::PathType(ty) = implementation.self_ty()? else {
+                return None;
+            };
+            return Some((owner, ty.path()?));
+        }
+        if ast::Adt::can_cast(node.kind()) {
+            let mut text = name(&node)?;
+            if let Some(parameters) = node.children().find_map(ast::GenericParamList::cast) {
+                let arguments = parameters
+                    .generic_params()
+                    .map(|parameter| {
+                        parameter
+                            .syntax()
+                            .children()
+                            .find(|node| {
+                                matches!(node.kind(), SyntaxKind::NAME | SyntaxKind::LIFETIME)
+                            })
+                            .map(|node| node.to_string())
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                text.push_str(&format!("<{}>", arguments.join(", ")));
+            }
+            let ast::Type::PathType(ty) = fragment::ty(&text, context.edition).ok()? else {
+                return None;
+            };
+            return Some((owner, ty.path()?));
+        }
+        if node.kind() == SyntaxKind::TRAIT || item && node.kind() == SyntaxKind::STMT_LIST {
+            return None;
+        }
+        if ast::Item::can_cast(node.kind()) && !ast::MacroCall::can_cast(node.kind()) {
+            if item {
+                return None;
+            }
+            item = true;
+        }
+    }
+    None
 }
 
 fn same(left: &Location, right: &Location) -> bool {
@@ -382,6 +427,28 @@ fn lookup_inner(
             }
         }
         return result;
+    }
+    if text == "Self" {
+        if namespace == Some(Namespace::Macro) {
+            return Vec::new();
+        }
+        let Some((owner, path)) = self_type(context) else {
+            return Vec::new();
+        };
+        if ast::Adt::can_cast(owner.node.kind()) {
+            return if namespace == Some(Namespace::Type) {
+                vec![owner.into()]
+            } else {
+                Vec::new()
+            };
+        }
+        return lookup(
+            definitions,
+            &owner,
+            &resolve::path_name(&path),
+            namespace,
+            visited,
+        );
     }
     let local = locals(context, text, namespace);
     let ancestors = scopes(context);
@@ -727,11 +794,26 @@ pub(crate) fn redirect(selected: Selected<'_>, target: &str) -> Result<()> {
     if selected.position.is_some() || selected.flow != flow::Options::default() {
         return Err("symbol redirection has no insertion or extraction options".into());
     }
-    fragment::path(target, selected.source.edition)?;
+    let replacement = fragment::path(target, selected.source.edition)?;
     let mut references = references(selected.source, &selected.location)?;
     references.sort_by_key(|location| std::cmp::Reverse(location.range().start()));
     let mut source = selected.source.clone();
     for reference in references {
+        let arguments = ast::Path::cast(reference.node.clone())
+            .filter(|path| resolve::path_name(path) == "Self")
+            .and_then(|_| self_type(&reference))
+            .and_then(|(owner, path)| Some((owner, path.segment()?.generic_arg_list()?)))
+            .filter(|_| {
+                replacement
+                    .segment()
+                    .is_none_or(|segment| segment.generic_arg_list().is_none())
+            })
+            .map(|(owner, arguments)| {
+                resolve::type_text(selected.source, &owner, arguments.syntax(), &[])
+            });
+        let rewritten =
+            arguments.map(|arguments| format!("{target}::{}", arguments.trim_start_matches("::")));
+        let target = rewritten.as_deref().unwrap_or(target);
         let mut selection = current(&mut source, &reference)?;
         if let Some(tree) = ast::UseTree::cast(selection.location.node.clone())
             && tree.rename().is_none()

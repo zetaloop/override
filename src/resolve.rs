@@ -633,7 +633,7 @@ pub(crate) fn type_shape(
     }
 }
 
-fn type_text(
+pub(crate) fn type_text(
     source: &Source,
     context: &Location,
     node: &SyntaxNode,
