@@ -1126,12 +1126,19 @@ fn insertion(list: &SyntaxNode, (location, edge): &(Location, Edge)) -> Result<u
                         .is_some_and(|element| matches!(element.kind(), T!['{'] | T!['('] | T![<])),
                 )
             } else {
-                contents.len()
-                    - usize::from(
-                        contents.last().is_some_and(|element| {
+                let tail = ast::StmtList::cast(list.clone())
+                    .and_then(|list| list.tail_expr())
+                    .and_then(|tail| {
+                        contents
+                            .iter()
+                            .position(|element| element.as_node() == Some(tail.syntax()))
+                    });
+                tail.unwrap_or_else(|| {
+                    contents.len()
+                        - usize::from(contents.last().is_some_and(|element| {
                             matches!(element.kind(), T!['}'] | T![')'] | T![>])
-                        }),
-                    )
+                        }))
+                })
             });
         }
         return Err("insertion boundary does not belong to the member list".into());
@@ -1244,11 +1251,20 @@ fn insert_item(
             })
             .ok_or("selected object cannot contain items")?
     };
+    let tail = ast::StmtList::cast(list.clone()).and_then(|list| list.tail_expr());
     let position = if let Some(position) = position {
         let index = insertion(&list, position)?;
-        list.children_with_tokens()
-            .nth(index)
-            .map_or_else(|| Position::last_child_of(&list), Position::before)
+        let element = list.children_with_tokens().nth(index);
+        if let Some(tail) = &tail
+            && element.as_ref().is_none_or(|element| {
+                element.text_range().start() > tail.syntax().text_range().start()
+            })
+        {
+            return Err("item insertion must precede the tail expression".into());
+        }
+        element.map_or_else(|| Position::last_child_of(&list), Position::before)
+    } else if let Some(tail) = tail {
+        Position::before(tail.syntax())
     } else if list.kind() == SyntaxKind::SOURCE_FILE {
         Position::last_child_of(&list)
     } else {
