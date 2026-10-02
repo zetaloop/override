@@ -620,11 +620,8 @@ pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -
                 )
                 .iter()
                 .all(|binding| {
-                    if binding.unresolved.is_some() {
-                        binding.imports.is_empty() && binding.declaration.same(scope)
-                    } else {
-                        binding.declaration.node.kind() == SyntaxKind::IDENT_PAT
-                    }
+                    binding.unresolved.is_none()
+                        && binding.declaration.node.kind() == SyntaxKind::IDENT_PAT
                 })
         }
         _ => false,

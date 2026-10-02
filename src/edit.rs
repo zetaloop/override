@@ -203,9 +203,16 @@ impl Selected<'_> {
                 .and_then(|expression| expression.match_arm_list())
                 .and_then(|list| list.arms().last())
             && last.guard().is_none()
-            && last.pat().is_some_and(|pattern| {
-                crate::symbol::catch_all(self.source, &self.location, &pattern)
-            })
+            && last
+                .pat()
+                .zip(last.expr())
+                .is_some_and(|(pattern, expression)| {
+                    crate::symbol::catch_all(
+                        self.source,
+                        &self.location.at(expression.syntax().clone()),
+                        &pattern,
+                    )
+                })
         {
             position = Some((self.location.at(last.syntax().clone()), Edge::Before));
         }
