@@ -119,6 +119,35 @@ pub(crate) fn equivalent(left: &SyntaxNode, right: &SyntaxNode) -> bool {
     left.kind() == right.kind() && tokens(left).eq(tokens(right))
 }
 
+pub(crate) fn block(
+    elements: &[ra_ap_syntax::SyntaxElement],
+    edition: Edition,
+) -> Result<ast::Expr> {
+    let start = elements
+        .iter()
+        .position(|element| element.kind() != SyntaxKind::WHITESPACE)
+        .unwrap_or(elements.len());
+    let end = elements
+        .iter()
+        .rposition(|element| element.kind() != SyntaxKind::WHITESPACE)
+        .map_or(start, |index| index + 1);
+    let mut text = String::from("{\n    ");
+    for element in &elements[start..end] {
+        if let Some(node) = element.as_node() {
+            text.push_str(&indent(node, "    ").to_string());
+        } else if element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n') {
+            text.push_str(&format!(
+                "{}    ",
+                "\n".repeat(element.to_string().matches('\n').count())
+            ));
+        } else {
+            text.push_str(&element.to_string());
+        }
+    }
+    text.push_str("\n}");
+    expression(&text, edition)
+}
+
 pub(crate) fn indentation(node: &SyntaxNode) -> String {
     std::iter::successors(node.first_token(), |token| token.prev_token())
         .filter(|token| token.kind() == SyntaxKind::WHITESPACE)

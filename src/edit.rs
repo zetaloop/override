@@ -363,13 +363,17 @@ impl Selected<'_> {
                                 || element.kind() == T![=]
                         })
                         .ok_or("missing declaration body")?;
-                    editor.insert_all(
-                        Position::before(anchor),
-                        vec![
-                            whitespace(" "),
-                            new.syntax().clone().into(),
-                            whitespace(" "),
-                        ],
+                    let index = node
+                        .children_with_tokens()
+                        .position(|element| element == anchor)
+                        .ok_or("missing where clause position")?;
+                    insert(
+                        editor,
+                        node,
+                        index,
+                        vec![fragment::indent(new.syntax(), &fragment::indentation(node)).into()],
+                        (" ".to_owned(), " ".to_owned()),
+                        false,
                     );
                 }
                 (None, None) => {}
@@ -438,14 +442,15 @@ impl Selected<'_> {
         let argument = self.location.argument;
         self.edit(|editor, node, edition| {
             let expression = fragment::expression(value, edition)?;
+            let expression = fragment::indent(expression.syntax(), &fragment::indentation(node));
             if argument {
-                editor.replace(node, expression.syntax());
+                editor.replace(node, &expression);
                 return Ok(());
             }
             if let Some(field) = ast::RecordExprField::cast(node.clone()) {
                 let old = field.expr().ok_or("field has no value")?;
                 if field.colon_token().is_some() {
-                    editor.replace(old.syntax(), expression.syntax());
+                    editor.replace(old.syntax(), &expression);
                 } else {
                     let name = field.field_name().ok_or("field has no name")?;
                     let original: SyntaxElement = old.syntax().clone().into();
@@ -455,7 +460,7 @@ impl Selected<'_> {
                             make::name_ref(name.text()).syntax().clone().into(),
                             make::token(T![:]).into(),
                             whitespace(" "),
-                            expression.syntax().clone().into(),
+                            expression.clone().into(),
                         ],
                     );
                 }
@@ -470,7 +475,7 @@ impl Selected<'_> {
                         .and_then(|argument| argument.syntax().children().find_map(ast::Expr::cast))
                 });
             if let Some(old) = value {
-                editor.replace(old.syntax(), expression.syntax());
+                editor.replace(old.syntax(), &expression);
                 return Ok(());
             }
             if matches!(
@@ -481,7 +486,7 @@ impl Selected<'_> {
                     whitespace(" "),
                     make::token(T![=]).into(),
                     whitespace(" "),
-                    expression.syntax().clone().into(),
+                    expression.clone().into(),
                 ];
                 if let Some(semicolon) = node.last_token().filter(|token| token.kind() == T![;]) {
                     editor.insert_all(Position::before(semicolon), elements);
@@ -789,10 +794,7 @@ impl Selected<'_> {
             } else if region.is_some() || ast::Fn::can_cast(node.kind()) {
                 let contents = if let Some(region) = &region {
                     flow::check(&location, region, region::tail(node, region))?;
-                    format!(
-                        "{{{}}}",
-                        region.iter().map(ToString::to_string).collect::<String>()
-                    )
+                    fragment::block(region, edition)?.to_string()
                 } else {
                     ast::Fn::cast(node.clone())
                         .and_then(|function| function.body())
@@ -828,7 +830,14 @@ impl Selected<'_> {
                     } else {
                         make::expr_stmt(call).syntax().clone()
                     };
-                    editor.replace_all(first.clone()..=last.clone(), vec![replacement.into()]);
+                    let indentation = first
+                        .as_node()
+                        .map(fragment::indentation)
+                        .unwrap_or_else(|| fragment::indentation(node));
+                    editor.replace_all(
+                        first.clone()..=last.clone(),
+                        vec![fragment::indent(&replacement, &indentation).into()],
+                    );
                 } else {
                     let body = ast::Fn::cast(node.clone())
                         .and_then(|function| function.body())
@@ -970,7 +979,12 @@ impl Selected<'_> {
                 call,
                 self.flow,
             )?;
-            let call = transformed.call;
+            let indentation = first
+                .as_node()
+                .map(fragment::indentation)
+                .unwrap_or_else(|| fragment::indentation(node));
+            let call = ast::Expr::cast(fragment::indent(transformed.call.syntax(), &indentation))
+                .ok_or("generated call is not an expression")?;
             let (body_editor, generated) = SyntaxEditor::with_ast_node(&generated);
             body_editor.replace(
                 generated.body().ok_or("missing generated body")?.syntax(),
@@ -1029,6 +1043,7 @@ impl Selected<'_> {
                 })
             })
             .map(|node| location.at(node));
+        let position = (location.clone(), Edge::After);
         Selected {
             source: &mut source,
             location,
@@ -1036,12 +1051,12 @@ impl Selected<'_> {
             position: None,
         }
         .edit(|editor, node, _| {
-            let indentation = ast::edit::IndentLevel::from_node(node);
-            editor.insert_all(
-                Position::after(node),
-                vec![whitespace(&format!("\n\n{indentation}")), generated.into()],
-            );
-            Ok(())
+            insert_item(
+                editor,
+                &node.parent().ok_or("function has no scope")?,
+                &generated,
+                Some(&position),
+            )
         })?;
         if let Some(declaration) = declaration {
             let owner = owner.ok_or("extracted control-flow type has no declaration scope")?;
@@ -1066,6 +1081,7 @@ impl Selected<'_> {
             }) {
                 return Err(format!("control-flow type `{}` already exists", name.text()).into());
             }
+            let position = (location.clone(), Edge::Before);
             Selected {
                 source: &mut source,
                 location,
@@ -1073,15 +1089,12 @@ impl Selected<'_> {
                 position: None,
             }
             .edit(|editor, node, _| {
-                let indentation = ast::edit::IndentLevel::from_node(node);
-                editor.insert_all(
-                    Position::before(node),
-                    vec![
-                        declaration.syntax().clone().into(),
-                        whitespace(&format!("\n\n{indentation}")),
-                    ],
-                );
-                Ok(())
+                insert_item(
+                    editor,
+                    &node.parent().ok_or("declaration has no scope")?,
+                    declaration.syntax(),
+                    Some(&position),
+                )
             })?;
         }
         self.source.root = source.root;
@@ -1384,7 +1397,13 @@ fn insert_item(
     item: &SyntaxNode,
     position: Option<&(Location, Edge)>,
 ) -> Result<()> {
-    let list = if node.kind() == SyntaxKind::SOURCE_FILE {
+    let list = if matches!(
+        node.kind(),
+        SyntaxKind::SOURCE_FILE
+            | SyntaxKind::ITEM_LIST
+            | SyntaxKind::ASSOC_ITEM_LIST
+            | SyntaxKind::STMT_LIST
+    ) {
         node.clone()
     } else {
         crate::select::body(node)
@@ -1495,8 +1514,15 @@ fn insert_item(
             )
         });
     let before = match prior {
-        None => String::new(),
-        Some(element) if element.kind() == T!['{'] || element.kind() == item.kind() => {
+        None => indent.clone(),
+        Some(element)
+            if element.kind() == T!['{']
+                || element.kind() == item.kind()
+                    && matches!(
+                        item.kind(),
+                        SyntaxKind::USE | SyntaxKind::MODULE | SyntaxKind::EXTERN_CRATE
+                    ) =>
+        {
             format!("\n{indent}")
         }
         Some(_) => format!("\n\n{indent}"),
@@ -1504,7 +1530,15 @@ fn insert_item(
     let after = match next {
         None => "\n".to_owned(),
         Some(element) if element.kind() == T!['}'] => format!("\n{}", fragment::indentation(&list)),
-        Some(element) if element.kind() == item.kind() => format!("\n{indent}"),
+        Some(element)
+            if element.kind() == item.kind()
+                && matches!(
+                    item.kind(),
+                    SyntaxKind::USE | SyntaxKind::MODULE | SyntaxKind::EXTERN_CRATE
+                ) =>
+        {
+            format!("\n{indent}")
+        }
         Some(_) => format!("\n\n{indent}"),
     };
     insert(

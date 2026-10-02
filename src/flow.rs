@@ -260,6 +260,18 @@ pub(crate) fn extract(
     let mut scope = location.clone();
     scope.region = Some(region.to_vec());
     let origin = scope.range().start();
+    let prefix = if region.first().is_some_and(|element| {
+        element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n')
+    }) {
+        String::new()
+    } else {
+        let indentation = region
+            .iter()
+            .find_map(SyntaxElement::as_node)
+            .map(fragment::indentation)
+            .unwrap_or_default();
+        format!("\n{indentation}")
+    };
     if options.control_flow {
         for jump in &jumps {
             let index = if let Some(index) = exits.iter().position(|exit| {
@@ -320,14 +332,16 @@ pub(crate) fn extract(
                 exits.len() - 1
             };
             edits.push((
-                jump.location.range().start() - origin + TextSize::from(1),
+                jump.location.range().start() - origin
+                    + TextSize::of(prefix.as_str())
+                    + TextSize::from(1),
                 jump.location.node.kind(),
                 index,
             ));
         }
     }
     let contents = region.iter().map(ToString::to_string).collect::<String>();
-    let body = fragment::expression(&format!("{{{contents}}}"), edition)?;
+    let body = fragment::expression(&format!("{{{prefix}{contents}}}"), edition)?;
     let mut body_source = Source {
         root: body.syntax().clone(),
         edition,
@@ -365,13 +379,13 @@ pub(crate) fn extract(
                 }
             })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(",\n    ");
         let visibility = signature
             .visibility()
             .map(|visibility| format!("{visibility} "))
             .unwrap_or_default();
         Some(fragment::one::<ast::Enum>(&fragment::file(
-            &format!("{visibility}enum {name}{generics} {{ {variants} }}"),
+            &format!("{visibility}enum {name}{generics} {{\n    {variants},\n}}"),
             edition,
         )?)?)
     } else {
@@ -421,6 +435,17 @@ pub(crate) fn extract(
             Ok(())
         })?;
     }
+    let elements = body_source
+        .root
+        .children()
+        .find_map(ast::StmtList::cast)
+        .ok_or("extracted body has no statements")?
+        .syntax()
+        .children_with_tokens()
+        .skip(1)
+        .take_while(|element| element.kind() != ra_ap_syntax::T!['}'])
+        .collect::<Vec<_>>();
+    body_source.root = fragment::block(&elements, edition)?.syntax().clone();
     let mut output = signature
         .ret_type()
         .and_then(|ret| ret.ty())
@@ -433,7 +458,7 @@ pub(crate) fn extract(
         .ok_or("extracted body has no statements")?;
     let mut value = list
         .tail_expr()
-        .map(|expression| expression.to_string())
+        .map(|expression| fragment::indent(expression.syntax(), "").to_string())
         .unwrap_or_else(|| "()".to_owned());
     let mut call = call.to_string();
     if !exits.is_empty() {
@@ -480,23 +505,30 @@ pub(crate) fn extract(
                 exit.action.expression(binding)
             ));
         }
-        call = format!("match {call} {{ {} }}", arms.join(", "));
+        call = format!("match {call} {{\n    {},\n}}", arms.join(",\n    "));
     }
     let transformed = !exits.is_empty() || container.is_some();
     if transformed && !diverges(block.syntax()) {
         let (editor, _) = SyntaxEditor::new(body_source.root.clone());
         let value = fragment::expression(&value, edition)?;
+        let value = fragment::indent(value.syntax(), "    ");
         if let Some(tail) = list.tail_expr() {
-            editor.replace(tail.syntax(), value.syntax());
+            editor.replace(tail.syntax(), value);
         } else {
+            let close = list
+                .r_curly_token()
+                .ok_or("extracted body has no closing brace")?;
+            if let Some(space) = close
+                .prev_sibling_or_token()
+                .filter(|element| element.kind() == SyntaxKind::WHITESPACE)
+            {
+                editor.delete(space);
+            }
             editor.insert_all(
-                Position::before(
-                    list.r_curly_token()
-                        .ok_or("extracted body has no closing brace")?,
-                ),
+                Position::before(close),
                 vec![
-                    make::tokens::whitespace("\n").into(),
-                    value.syntax().clone().into(),
+                    make::tokens::whitespace("\n    ").into(),
+                    value.into(),
                     make::tokens::whitespace("\n").into(),
                 ],
             );

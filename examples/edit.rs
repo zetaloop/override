@@ -2,40 +2,45 @@ use r#override::{Edition, Result, Source, arm, item};
 
 fn main() -> Result<()> {
     let mut source = Source::parse(
-        r#"
-use std::io::{self, Write};
+        r#"pub mod upstream {
+    use std::io::{self, Write};
 
-pub enum Command {
-    Print(String),
-    Quit,
-}
-
-pub fn dispatch(command: Command, output: &mut impl Write) -> Result<bool, io::Error> {
-    match command {
-        Command::Print(message) => {
-            writeln!(output, "{message}")?;
-            output.flush()?;
-        }
-        Command::Quit => return Ok(false),
+    pub enum Command {
+        Print(String),
+        Quit,
     }
-    Ok(true)
+
+    pub fn dispatch(command: Command, output: &mut impl Write) -> Result<bool, io::Error> {
+        match command {
+            Command::Print(message) => {
+                writeln!(output, "{message}")?;
+                output.flush()?;
+            }
+            Command::Quit => return Ok(false),
+        }
+        Ok(true)
+    }
 }
 "#,
         Edition::Edition2024,
     )?;
 
     source
-        .select(item("dispatch").arm("Command::Print"))?
+        .select(item("upstream::dispatch").arm("Command::Print"))?
         .propagate()
         .extract(
             "pub fn write_line(message: &str, output: &mut impl Write)",
             &["&message", "output"],
         )?;
     source
-        .select(item("Command"))?
+        .select(item("upstream::Command"))?
         .add_variant("Repeat { message: String, count: usize }")?;
     source
-        .select(item("dispatch").match_expr().has(arm("Command::Print")))?
+        .select(
+            item("upstream::dispatch")
+                .match_expr()
+                .has(arm("Command::Print")),
+        )?
         .at(arm("Command::Quit").before())
         .add_arm("Command::Repeat { message, count } => crate::repeat(&message, count, output)?")?;
 
@@ -56,6 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 "#;
-    print!("pub mod upstream {{\n{source}\n}}\n{application}");
+    print!("{source}{application}");
     Ok(())
 }
