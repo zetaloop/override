@@ -167,11 +167,22 @@ pub(crate) fn indent(node: &SyntaxNode, indentation: &str) -> SyntaxNode {
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
     {
-        if token.kind() == SyntaxKind::WHITESPACE && token.text().contains('\n') {
-            let text = token
-                .text()
-                .replace(&format!("\n{original}"), &format!("\n{indentation}"));
-            editor.replace(token, make::tokens::whitespace(&text));
+        if token.kind() == SyntaxKind::WHITESPACE
+            && let Some((lines, indent)) = token.text().rsplit_once('\n')
+        {
+            let lines = lines
+                .split('\n')
+                .map(|line| line.trim_end_matches([' ', '\t']))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let indent = indent.strip_prefix(&original).map_or_else(
+                || indent.to_owned(),
+                |relative| format!("{indentation}{relative}"),
+            );
+            editor.replace(
+                token,
+                make::tokens::whitespace(&format!("{lines}\n{indent}")),
+            );
         }
     }
     editor.finish().new_root().clone()
