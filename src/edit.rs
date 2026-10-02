@@ -73,7 +73,7 @@ impl Selected<'_> {
             let old = node.children().find_map(ast::Visibility::cast);
             match (old, function.visibility()) {
                 (Some(old), Some(new)) => editor.replace(old.syntax(), new.syntax()),
-                (Some(old), None) => editor.delete(old.syntax()),
+                (Some(old), None) => remove_node(editor, old.syntax()),
                 (None, Some(new)) => editor.insert_all(
                     Position::before(header(node)?),
                     vec![new.syntax().clone().into(), whitespace(" ")],
@@ -348,7 +348,7 @@ impl Selected<'_> {
             let old = node.children().find_map(ast::WhereClause::cast);
             match (old, new) {
                 (Some(old), Some(new)) => editor.replace(old.syntax(), new.syntax()),
-                (Some(old), None) => editor.delete(old.syntax()),
+                (Some(old), None) => remove_node(editor, old.syntax()),
                 (None, Some(new)) => {
                     let anchor = node
                         .children_with_tokens()
@@ -538,7 +538,7 @@ impl Selected<'_> {
                 if let Some(tree) = ast::UseTree::cast(branch.clone()) {
                     tree.remove(editor);
                 } else {
-                    editor.delete(branch);
+                    remove_node(editor, &branch);
                 }
                 return Ok(());
             }
@@ -570,15 +570,7 @@ impl Selected<'_> {
             {
                 return Err("selected object is not a removable declaration or member".into());
             }
-            if let Some(next) = std::iter::successors(node.next_sibling_or_token(), |element| {
-                element.next_sibling_or_token()
-            })
-            .find(|element| !element.kind().is_trivia())
-                && next.kind() == T![,]
-            {
-                editor.delete(next);
-            }
-            editor.delete(node);
+            remove_node(editor, node);
             Ok(())
         })
     }
@@ -1119,6 +1111,121 @@ fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {
         .parent()
         .filter(|node| ast::Use::can_cast(node.kind()))
         .ok_or_else(|| "import has no declaration".into())
+}
+
+fn remove_node(editor: &SyntaxEditor, node: &SyntaxNode) {
+    let mut first: SyntaxElement = node.clone().into();
+    let mut last = first.clone();
+    let mut prefix = Vec::new();
+    if node
+        .prev_sibling_or_token()
+        .is_some_and(|element| !element.to_string().contains('\n'))
+        && node
+            .first_child_or_token()
+            .is_some_and(|element| element.kind() == SyntaxKind::COMMENT)
+    {
+        for element in node
+            .children_with_tokens()
+            .take_while(|element| element.kind().is_trivia())
+        {
+            let newline =
+                element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n');
+            prefix.push(element);
+            if newline {
+                break;
+            }
+        }
+    }
+    let following = std::iter::successors(node.next_sibling_or_token(), |element| {
+        element.next_sibling_or_token()
+    })
+    .collect::<Vec<_>>();
+    let mut end = 0;
+    while following
+        .get(end)
+        .is_some_and(|element| element.kind() == SyntaxKind::WHITESPACE)
+    {
+        end += 1;
+    }
+    let comma = following
+        .get(end)
+        .is_some_and(|element| element.kind() == T![,]);
+    if comma {
+        last = following[end].clone();
+        end += 1;
+    } else {
+        end = 0;
+    }
+    let mut newline = false;
+    while let Some(element) = following.get(end) {
+        if element.kind() == SyntaxKind::WHITESPACE {
+            newline |= element.to_string().contains('\n');
+        } else if element.kind() != SyntaxKind::COMMENT || newline {
+            break;
+        }
+        end += 1;
+    }
+    if !newline
+        && let Some(next) = following.get(end).and_then(SyntaxElement::as_node)
+        && next
+            .first_child_or_token()
+            .is_some_and(|element| element.kind() == SyntaxKind::COMMENT)
+    {
+        for element in next
+            .children_with_tokens()
+            .take_while(|element| element.kind().is_trivia())
+        {
+            let newline =
+                element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n');
+            editor.delete(element);
+            if newline {
+                break;
+            }
+        }
+    }
+    let closing = following
+        .get(end)
+        .is_none_or(|element| matches!(element.kind(), T!['}'] | T![')'] | T![>] | T![|]));
+    if closing {
+        if let Some(space) = first
+            .prev_sibling_or_token()
+            .filter(|element| element.kind() == SyntaxKind::WHITESPACE)
+        {
+            first = space;
+        }
+        if !newline
+            && let Some(separator) = first
+                .prev_sibling_or_token()
+                .filter(|element| element.kind() == T![,])
+        {
+            first = separator;
+        }
+        if end > 0
+            && following[end - 1].kind() == SyntaxKind::WHITESPACE
+            && (newline
+                || following
+                    .get(end)
+                    .is_some_and(|element| element.kind() == T!['}']))
+        {
+            if end > 1 {
+                last = following[end - 2].clone();
+            }
+        } else if end > 0 {
+            last = following[end - 1].clone();
+        }
+        if prefix
+            .last()
+            .is_some_and(|element| element.kind() == SyntaxKind::WHITESPACE)
+        {
+            prefix.pop();
+        }
+        if !prefix.is_empty() {
+            prefix.insert(0, whitespace(" "));
+        }
+    } else if end > 0 {
+        last = following[end - 1].clone();
+    }
+    editor.replace_all(first..=last, prefix);
 }
 
 fn whitespace(text: &str) -> SyntaxElement {
