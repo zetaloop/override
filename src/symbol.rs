@@ -590,6 +590,47 @@ fn path_namespace(path: &ast::Path) -> Option<Namespace> {
     }
 }
 
+pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -> bool {
+    match pattern {
+        ast::Pat::WildcardPat(_) => true,
+        ast::Pat::ParenPat(pattern) => pattern
+            .pat()
+            .is_some_and(|pattern| catch_all(source, scope, &pattern)),
+        ast::Pat::OrPat(pattern) => pattern
+            .pats()
+            .any(|pattern| catch_all(source, scope, &pattern)),
+        ast::Pat::IdentPat(pattern) => {
+            if let Some(pattern) = pattern.pat() {
+                return catch_all(source, scope, &pattern);
+            }
+            let Some(name) = pattern.name() else {
+                return false;
+            };
+            pattern.ref_token().is_some()
+                || pattern.mut_token().is_some()
+                || lookup(
+                    &resolve::declarations(source)
+                        .into_iter()
+                        .map(|(_, location)| location)
+                        .collect::<Vec<_>>(),
+                    scope,
+                    name.text(),
+                    Some(Namespace::Value),
+                    &mut HashSet::new(),
+                )
+                .iter()
+                .all(|binding| {
+                    if binding.unresolved.is_some() {
+                        binding.imports.is_empty() && binding.declaration.same(scope)
+                    } else {
+                        binding.declaration.node.kind() == SyntaxKind::IDENT_PAT
+                    }
+                })
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn declaration(source: &Source, scope: &Location) -> Result<Location> {
     let name = scope.symbol.as_deref().ok_or("selection has no symbol")?;
     let definitions = resolve::declarations(source)

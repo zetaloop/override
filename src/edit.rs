@@ -102,7 +102,7 @@ impl Selected<'_> {
                     |element| Position::before(element.clone()),
                 )
             } else {
-                Position::first_child_of(node)
+                Position::before(header(node)?)
             };
             let indentation = ast::edit::IndentLevel::from_node(node);
             editor.insert_all(
@@ -188,19 +188,35 @@ impl Selected<'_> {
     }
 
     pub fn add_arm(mut self, declaration: &str) -> Result<()> {
-        let position = self.insertion()?;
-        self.edit(|editor, node, edition| {
+        let mut position = self.insertion()?;
+        let parsed = fragment::expression(
+            &format!("match () {{ {declaration} }}"),
+            self.source.edition,
+        )?;
+        let arm = fragment::one::<ast::MatchArm>(parsed.syntax())?;
+        if position.is_none()
+            && (arm.guard().is_some()
+                || !arm.pat().is_some_and(|pattern| {
+                    crate::symbol::catch_all(self.source, &self.location, &pattern)
+                }))
+            && let Some(last) = ast::MatchExpr::cast(self.location.node.clone())
+                .and_then(|expression| expression.match_arm_list())
+                .and_then(|list| list.arms().last())
+            && last.guard().is_none()
+            && last.pat().is_some_and(|pattern| {
+                crate::symbol::catch_all(self.source, &self.location, &pattern)
+            })
+        {
+            position = Some((self.location.at(last.syntax().clone()), Edge::Before));
+        }
+        self.edit(|editor, node, _| {
             let list = ast::MatchExpr::cast(node.clone())
                 .and_then(|expression| expression.match_arm_list())
                 .ok_or("selected object is not a match")?;
-            let parsed = fragment::expression(&format!("match () {{ {declaration} }}"), edition)?;
             append(
                 editor,
                 list.syntax(),
-                fragment::one::<ast::MatchArm>(parsed.syntax())?
-                    .syntax()
-                    .clone()
-                    .into(),
+                arm.syntax().clone().into(),
                 position.as_ref(),
             )
         })
@@ -223,25 +239,15 @@ impl Selected<'_> {
             let [parameter] = parameters.as_slice() else {
                 return Err("expected one parameter".into());
             };
-            if ast::SelfParam::can_cast(parameter.kind()) && position.is_none() {
-                if list.self_param().is_some() {
-                    return Err("function already has a receiver".into());
-                }
-                let open = list.l_paren_token().ok_or("missing opening parenthesis")?;
-                let mut elements = vec![parameter.clone().into()];
-                if list.params().next().is_some() {
-                    elements.extend([make::token(T![,]).into(), whitespace(" ")]);
-                }
-                editor.insert_all(Position::after(open), elements);
-                Ok(())
-            } else {
-                append(
-                    editor,
-                    list.syntax(),
-                    parameter.clone().into(),
-                    position.as_ref(),
-                )
+            if ast::SelfParam::can_cast(parameter.kind()) && list.self_param().is_some() {
+                return Err("function already has a receiver".into());
             }
+            append(
+                editor,
+                list.syntax(),
+                parameter.clone().into(),
+                position.as_ref(),
+            )
         })
     }
 
@@ -1126,34 +1132,38 @@ fn insertion(list: &SyntaxNode, (location, edge): &(Location, Edge)) -> Result<u
                 || crate::select::body(&location.node)
                     .is_some_and(|body| Some(body) == list.parent()))
         {
-            return Ok(
-                if matches!(edge, Edge::Start) && list.kind() == SyntaxKind::SOURCE_FILE {
-                    contents
-                        .iter()
-                        .position(|element| ast::Item::can_cast(element.kind()))
-                        .unwrap_or(contents.len())
-                } else if matches!(edge, Edge::Start) {
-                    usize::from(
-                        contents.first().is_some_and(|element| {
-                            matches!(element.kind(), T!['{'] | T!['('] | T![<])
-                        }),
-                    )
-                } else {
-                    let tail = ast::StmtList::cast(list.clone())
-                        .and_then(|list| list.tail_expr())
-                        .and_then(|tail| {
-                            contents
-                                .iter()
-                                .position(|element| element.as_node() == Some(tail.syntax()))
-                        });
-                    tail.unwrap_or_else(|| {
+            return Ok(if matches!(edge, Edge::Start) {
+                contents
+                    .iter()
+                    .position(|element| {
+                        !element.kind().is_trivia()
+                            && !matches!(
+                                element.kind(),
+                                SyntaxKind::DOC_COMMENT
+                                    | SyntaxKind::SHEBANG
+                                    | T!['{']
+                                    | T!['(']
+                                    | T![<]
+                                    | T![|]
+                            )
+                            && !ast::AnyAttr::can_cast(element.kind())
+                    })
+                    .unwrap_or(contents.len())
+            } else {
+                ast::StmtList::cast(list.clone())
+                    .and_then(|list| list.tail_expr())
+                    .and_then(|tail| {
+                        contents
+                            .iter()
+                            .position(|element| element.as_node() == Some(tail.syntax()))
+                    })
+                    .unwrap_or_else(|| {
                         contents.len()
                             - usize::from(contents.last().is_some_and(|element| {
-                                matches!(element.kind(), T!['}'] | T![')'] | T![>])
+                                matches!(element.kind(), T!['}'] | T![')'] | T![>] | T![|])
                             }))
                     })
-                },
-            );
+            });
         }
         return Err("insertion boundary does not belong to the member list".into());
     }
@@ -1180,6 +1190,84 @@ fn insertion(list: &SyntaxNode, (location, edge): &(Location, Edge)) -> Result<u
         .map_or(contents.len(), |(index, _)| index))
 }
 
+fn insert(
+    editor: &SyntaxEditor,
+    list: &SyntaxNode,
+    index: usize,
+    mut elements: Vec<SyntaxElement>,
+    (mut before, mut after): (String, String),
+    separator: bool,
+) {
+    let contents = list.children_with_tokens().collect::<Vec<_>>();
+    let start = contents[..index]
+        .iter()
+        .rposition(|element| element.kind() != SyntaxKind::WHITESPACE)
+        .map_or(0, |index| index + 1);
+    let mut space = contents[start..index]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    let mut prefix = Vec::new();
+    if separator {
+        prefix.push(make::token(T![,]).into());
+    }
+    if !space.contains('\n')
+        && start > 0
+        && let Some(node) = contents.get(index).and_then(SyntaxElement::as_node)
+        && node
+            .first_child_or_token()
+            .is_some_and(|element| element.kind() == SyntaxKind::COMMENT)
+    {
+        if !space.is_empty() {
+            prefix.push(whitespace(&space));
+        }
+        for element in node.children_with_tokens() {
+            if element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n') {
+                space = element.to_string();
+                editor.delete(element);
+                break;
+            }
+            if !element.kind().is_trivia() {
+                break;
+            }
+            prefix.push(element.clone());
+            editor.delete(element);
+        }
+    }
+    let lines = space.matches('\n').count();
+    let target = if start == 0
+        || before.matches('\n').count() > after.matches('\n').count()
+        || index == contents.len()
+    {
+        &mut before
+    } else {
+        &mut after
+    };
+    if lines > target.matches('\n').count() {
+        let indent = target.rsplit('\n').next().unwrap_or_default();
+        *target = format!("{}{indent}", "\n".repeat(lines));
+    }
+    if !before.is_empty() {
+        prefix.push(whitespace(&before));
+    }
+    prefix.append(&mut elements);
+    if !after.is_empty() {
+        prefix.push(whitespace(&after));
+    }
+    if start < index {
+        editor.replace_all(
+            contents[start].clone()..=contents[index - 1].clone(),
+            prefix,
+        );
+    } else {
+        let position = contents.get(index).map_or_else(
+            || Position::last_child_of(list),
+            |element| Position::before(element.clone()),
+        );
+        editor.insert_all(position, prefix);
+    }
+}
+
 fn append(
     editor: &SyntaxEditor,
     list: &SyntaxNode,
@@ -1192,7 +1280,16 @@ fn append(
     } else {
         contents
             .iter()
-            .position(|element| element.kind() == T![..])
+            .position(|member| match element.kind() {
+                SyntaxKind::SELF_PARAM => {
+                    matches!(member.kind(), SyntaxKind::PARAM | T![')'] | T![|])
+                }
+                SyntaxKind::LIFETIME_PARAM => matches!(
+                    member.kind(),
+                    SyntaxKind::TYPE_PARAM | SyntaxKind::CONST_PARAM
+                ),
+                _ => member.kind() == T![..] || member.kind() == SyntaxKind::REST_PAT,
+            })
             .unwrap_or(
                 contents
                     .len()
@@ -1200,12 +1297,14 @@ fn append(
                     .ok_or("list has no delimiter")?,
             )
     };
-    let before = &contents[..end];
-    let last = before
+    let first = contents[..end]
         .iter()
         .rposition(|element| !element.kind().is_trivia())
         .ok_or("list has no opening delimiter")?;
-    let occupied = before.iter().any(|element| element.as_node().is_some());
+    let previous = &contents[first];
+    let occupied = contents[..end]
+        .iter()
+        .any(|element| element.as_node().is_some());
     let comma = |element: &SyntaxElement| {
         element.kind() == T![,]
             || element
@@ -1213,35 +1312,69 @@ fn append(
                 .and_then(SyntaxNode::last_token)
                 .is_some_and(|token| token.kind() == T![,])
     };
-    let separator = occupied && !comma(&before[last]);
-    let spacing = if list.to_string().contains('\n') {
-        format!("\n{}", ast::edit::IndentLevel::from_node(list) + 1)
-    } else {
-        " ".to_owned()
+    let block_arm = |element: &SyntaxElement| {
+        element
+            .as_node()
+            .cloned()
+            .and_then(ast::MatchArm::cast)
+            .and_then(|arm| arm.expr())
+            .is_some_and(|expression| expression.is_block_like())
     };
-    let trailing = !comma(&element) && element.kind() != SyntaxKind::REST_PAT;
-    let mut elements = vec![whitespace(&spacing), element];
+    let separator = occupied && !comma(previous) && !block_arm(previous);
+    let multiline = contents.iter().any(|element| {
+        element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n')
+    }) || element.as_node().is_some_and(|node| {
+        node.descendants_with_tokens().any(|element| {
+            element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n')
+        })
+    });
+    let indent = contents
+        .iter()
+        .filter_map(SyntaxElement::as_node)
+        .next()
+        .map(fragment::indentation)
+        .filter(|indent| !indent.is_empty())
+        .unwrap_or_else(|| format!("{}    ", fragment::indentation(list)));
+    let next = contents.get(end).ok_or("list has no closing delimiter")?;
+    let closing = matches!(next.kind(), T!['}'] | T![')'] | T![>] | T![|]);
+    let before = if multiline {
+        format!("\n{indent}")
+    } else if occupied
+        || contents
+            .first()
+            .is_some_and(|element| element.kind() == T!['{'])
+    {
+        " ".to_owned()
+    } else {
+        String::new()
+    };
+    let after = if multiline {
+        format!(
+            "\n{}",
+            if closing {
+                fragment::indentation(list)
+            } else {
+                indent.clone()
+            }
+        )
+    } else if !closing || next.kind() == T!['}'] {
+        " ".to_owned()
+    } else {
+        String::new()
+    };
+    let trailing = !comma(&element)
+        && element.kind() != SyntaxKind::REST_PAT
+        && !block_arm(&element)
+        && (multiline || !closing);
+    let element = element
+        .as_node()
+        .map(|node| fragment::indent(node, &indent).into())
+        .unwrap_or(element);
+    let mut elements = vec![element];
     if trailing {
         elements.push(make::token(T![,]).into());
     }
-    if before[last + 1..]
-        .iter()
-        .any(|element| element.kind() == SyntaxKind::COMMENT)
-    {
-        if separator {
-            editor.insert(Position::after(before[last].clone()), make::token(T![,]));
-        }
-        let position = before
-            .last()
-            .filter(|element| element.kind() == SyntaxKind::WHITESPACE)
-            .unwrap_or(&contents[end]);
-        editor.insert_all(Position::before(position.clone()), elements);
-    } else {
-        if separator {
-            elements.insert(0, make::token(T![,]).into());
-        }
-        editor.insert_all(Position::after(before[last].clone()), elements);
-    }
+    insert(editor, list, end, elements, (before, after), separator);
     Ok(())
 }
 
@@ -1265,31 +1398,122 @@ fn insert_item(
             })
             .ok_or("selected object cannot contain items")?
     };
+    let contents = list.children_with_tokens().collect::<Vec<_>>();
     let tail = ast::StmtList::cast(list.clone()).and_then(|list| list.tail_expr());
-    let position = if let Some(position) = position {
+    let index = if let Some(position) = position {
         let index = insertion(&list, position)?;
-        let element = list.children_with_tokens().nth(index);
         if let Some(tail) = &tail
-            && element.as_ref().is_none_or(|element| {
+            && contents.get(index).is_none_or(|element| {
                 element.text_range().start() > tail.syntax().text_range().start()
             })
         {
             return Err("item insertion must precede the tail expression".into());
         }
-        element.map_or_else(|| Position::last_child_of(&list), Position::before)
-    } else if let Some(tail) = tail {
-        Position::before(tail.syntax())
-    } else if list.kind() == SyntaxKind::SOURCE_FILE {
-        Position::last_child_of(&list)
+        index
     } else {
-        Position::before(
-            list.last_token()
-                .ok_or("item list has no closing delimiter")?,
-        )
+        let items = list
+            .children()
+            .filter(|node| !ast::AnyAttr::can_cast(node.kind()))
+            .collect::<Vec<_>>();
+        let declarations = items
+            .iter()
+            .take_while(|node| {
+                matches!(node.kind(), SyntaxKind::USE | SyntaxKind::EXTERN_CRATE)
+                    || ast::Module::cast((*node).clone())
+                        .is_some_and(|module| module.semicolon_token().is_some())
+            })
+            .collect::<Vec<_>>();
+        let import_root = |node: &SyntaxNode| {
+            ast::Use::cast(node.clone())
+                .and_then(|import| import.use_tree())
+                .and_then(|tree| tree.path())
+                .and_then(|path| path.segments().next().map(|segment| segment.to_string()))
+        };
+        let anchor = if item.kind() == SyntaxKind::USE {
+            declarations
+                .iter()
+                .rev()
+                .find(|node| {
+                    node.kind() == SyntaxKind::USE && import_root(node) == import_root(item)
+                })
+                .or_else(|| {
+                    declarations
+                        .iter()
+                        .rev()
+                        .find(|node| node.kind() == SyntaxKind::USE)
+                })
+                .or_else(|| {
+                    declarations
+                        .iter()
+                        .rev()
+                        .find(|node| node.kind() == SyntaxKind::EXTERN_CRATE)
+                })
+        } else {
+            declarations
+                .iter()
+                .rev()
+                .find(|node| node.kind() == SyntaxKind::MODULE)
+                .or_else(|| declarations.last())
+        };
+        if let Some(anchor) = anchor {
+            let index = contents
+                .iter()
+                .position(|element| element.as_node() == Some(*anchor))
+                .ok_or("missing declaration")?;
+            contents
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find(|(_, element)| !element.kind().is_trivia())
+                .map_or(contents.len(), |(index, _)| index)
+        } else if let Some(first) = items.first() {
+            contents
+                .iter()
+                .position(|element| element.as_node() == Some(first))
+                .ok_or("missing first item")?
+        } else {
+            contents
+                .iter()
+                .position(|element| element.kind() == T!['}'])
+                .unwrap_or(contents.len())
+        }
     };
-    editor.insert_all(
-        position,
-        vec![whitespace("\n"), item.clone().into(), whitespace("\n")],
+    let prior = contents[..index]
+        .iter()
+        .rfind(|element| !element.kind().is_trivia());
+    let next = contents.get(index);
+    let file = list.kind() == SyntaxKind::SOURCE_FILE;
+    let indent = list
+        .children()
+        .find(|node| !ast::AnyAttr::can_cast(node.kind()))
+        .map(|node| fragment::indentation(&node))
+        .unwrap_or_else(|| {
+            format!(
+                "{}{}",
+                fragment::indentation(&list),
+                if file { "" } else { "    " }
+            )
+        });
+    let before = match prior {
+        None => String::new(),
+        Some(element) if element.kind() == T!['{'] || element.kind() == item.kind() => {
+            format!("\n{indent}")
+        }
+        Some(_) => format!("\n\n{indent}"),
+    };
+    let after = match next {
+        None => "\n".to_owned(),
+        Some(element) if element.kind() == T!['}'] => format!("\n{}", fragment::indentation(&list)),
+        Some(element) if element.kind() == item.kind() => format!("\n{indent}"),
+        Some(_) => format!("\n\n{indent}"),
+    };
+    insert(
+        editor,
+        &list,
+        index,
+        vec![fragment::indent(item, &indent).into()],
+        (before, after),
+        false,
     );
     Ok(())
 }

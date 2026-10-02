@@ -1,4 +1,8 @@
-use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxNode, ast, ast::HasName};
+use ra_ap_syntax::{
+    AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, ast,
+    ast::{HasName, make},
+    syntax_editor::SyntaxEditor,
+};
 
 use crate::Result;
 
@@ -113,6 +117,35 @@ pub(crate) fn equivalent(left: &SyntaxNode, right: &SyntaxNode) -> bool {
             .map(|token| (token.kind(), token.text().to_owned()))
     };
     left.kind() == right.kind() && tokens(left).eq(tokens(right))
+}
+
+pub(crate) fn indentation(node: &SyntaxNode) -> String {
+    std::iter::successors(node.first_token(), |token| token.prev_token())
+        .filter(|token| token.kind() == SyntaxKind::WHITESPACE)
+        .find_map(|token| {
+            token
+                .text()
+                .rsplit_once('\n')
+                .map(|(_, indent)| indent.to_owned())
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn indent(node: &SyntaxNode, indentation: &str) -> SyntaxNode {
+    let original = self::indentation(node);
+    let (editor, root) = SyntaxEditor::new(node.clone());
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+    {
+        if token.kind() == SyntaxKind::WHITESPACE && token.text().contains('\n') {
+            let text = token
+                .text()
+                .replace(&format!("\n{original}"), &format!("\n{indentation}"));
+            editor.replace(token, make::tokens::whitespace(&text));
+        }
+    }
+    editor.finish().new_root().clone()
 }
 
 pub(crate) fn spelling(node: &SyntaxNode) -> String {
