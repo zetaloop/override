@@ -15,6 +15,8 @@ mod package;
 mod sources;
 
 #[cfg(feature = "build")]
+pub use cargo_config2::Config;
+#[cfg(feature = "build")]
 pub use cargo_metadata::{DependencyKind, Target, TargetKind};
 #[cfg(feature = "build")]
 pub use manifest::check_target;

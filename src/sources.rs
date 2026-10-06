@@ -55,8 +55,10 @@ impl Package {
                 );
                 println!("cargo::rerun-if-changed={}", checksum.display());
             } else {
-                let config = cargo_config2::Config::load_with_cwd(&self.context)?;
-                let mut configured = config.source.iter().find_map(|(name, source)| {
+                let config = self.config.as_ref().ok_or(
+                    "registry source configuration is unavailable; supply it with config()",
+                )?;
+                let mut configured = config.iter().find_map(|(name, source)| {
                     (source.registry.as_deref() == Some(registry)
                         || name == "crates-io"
                             && matches!(
@@ -72,7 +74,7 @@ impl Package {
                     if !visited.insert(name) {
                         return Err(format!("cyclic source replacement at `{name}`").into());
                     }
-                    configured = config.source.get(name);
+                    configured = config.get(name);
                 }
                 let directory = if let Some(directory) =
                     configured.and_then(|source| source.local_registry.as_ref())

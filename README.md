@@ -53,6 +53,8 @@ include!(env!("UPSTREAM_SOURCE"));
 
 Crate-level attributes belong in the bridge root because `include!` rejects inner attributes. Cargo metadata resolves the bridge's workspace, which may differ from its consumer's dependency graph; the bridge should fix its source dependency's version and origin.
 
+Cargo metadata omits source-replacement settings. When importing a graph with `Package::from_metadata`, use `.config(...)` to supply the corresponding configuration before preparing registry archives.
+
 Reusing an upstream `build.rs` requires a helper build dependency to prepare it before the bridge script is compiled. Its exported include macro uses the bridge's features and package environment; relative resource paths resolve against the prepared source. [tests/build.rs](tests/build.rs) contains a complete bridge workspace with this arrangement and dependency replacement.
 
 ## Development

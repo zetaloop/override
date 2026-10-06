@@ -1,22 +1,18 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, env, fs, path::Path, process::Command, sync::Arc};
 
+use cargo_config2::SourceConfigValue;
 use cargo_metadata::{
     CargoOpt, Dependency, Metadata, MetadataCommand, PackageId, Target, TargetKind,
 };
 
-use crate::{Edition, Result};
+use crate::{Config, Edition, Result};
 
 #[derive(Clone, Debug)]
 pub struct Package {
     pub(crate) graph: Arc<Metadata>,
     pub(crate) index: usize,
     pub(crate) alias: Option<String>,
-    pub(crate) context: PathBuf,
+    pub(crate) config: Option<Arc<BTreeMap<String, SourceConfigValue>>>,
 }
 
 impl Package {
@@ -43,7 +39,7 @@ impl Package {
             graph: Arc::new(graph),
             index,
             alias: None,
-            context: context.to_owned(),
+            config: Some(Arc::new(Config::load_with_cwd(context)?.source)),
         })
     }
 
@@ -54,11 +50,16 @@ impl Package {
             .position(|package| package.id == *id)
             .ok_or_else(|| format!("Cargo metadata has no package `{id}`"))?;
         Ok(Self {
-            context: graph.workspace_root.as_std_path().to_owned(),
             graph: Arc::new(graph),
             index,
             alias: None,
+            config: None,
         })
+    }
+
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = Some(Arc::new(config.source));
+        self
     }
 
     pub fn data(&self) -> &cargo_metadata::Package {
@@ -225,7 +226,7 @@ impl Package {
                 graph: self.graph.clone(),
                 index: *index,
                 alias: Some(dependency_name(dependency).to_owned()),
-                context: self.context.clone(),
+                config: self.config.clone(),
             })),
             [] => Ok(None),
             _ => Err(format!(
