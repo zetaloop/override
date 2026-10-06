@@ -452,8 +452,8 @@ fn expression_type(location: &Location, expression: &ast::Expr) -> Option<ast::T
                             _ => None,
                         })
                         .filter(|binding| {
-                            binding.syntax().text_range().end()
-                                <= expression.syntax().text_range().start()
+                            location.at(binding.syntax().clone()).range().end()
+                                <= location.at(expression.syntax().clone()).range().start()
                         })
                         .filter(|binding| {
                             binding
@@ -867,8 +867,8 @@ fn call_declaration(
                                 _ => None,
                             })
                             .filter(|binding| {
-                                binding.syntax().text_range().end()
-                                    <= reference.node.text_range().start()
+                                reference.at(binding.syntax().clone()).range().end()
+                                    <= reference.range().start()
                             })
                             .filter(|binding| {
                                 binding.pat().is_some_and(|pattern| {
