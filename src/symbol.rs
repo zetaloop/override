@@ -636,13 +636,13 @@ pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -
     }
 }
 
-pub(crate) fn binding(source: &Source, context: &Location, name: &str) -> Result<Location> {
-    let definitions = resolve::declarations(source)
-        .into_iter()
-        .map(|(_, location)| location)
-        .collect::<Vec<_>>();
+pub(crate) fn binding(
+    definitions: &[Location],
+    context: &Location,
+    name: &str,
+) -> Result<Location> {
     let candidates = lookup(
-        &definitions,
+        definitions,
         context,
         name,
         Some(Namespace::Value),
