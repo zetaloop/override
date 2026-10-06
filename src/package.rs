@@ -243,28 +243,36 @@ impl Package {
     }
 
     pub(crate) fn workspace_manifest(&self) -> Result<std::path::PathBuf> {
-        let text = self.command(&["locate-project", "--workspace", "--message-format", "plain"])?;
+        let text = output(&mut self.command(&[
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+        ]))?;
         Ok(text.trim().into())
     }
 
-    pub(crate) fn command(&self, arguments: &[&str]) -> Result<String> {
-        let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    pub(crate) fn command(&self, arguments: &[&str]) -> Command {
+        let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        command
             .current_dir(self.directory())
             .args(arguments)
             .arg("--manifest-path")
-            .arg(&self.data().manifest_path)
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "cargo {} failed for `{}`: {}",
-                arguments.join(" "),
-                self.data().name,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-            .into());
-        }
-        Ok(String::from_utf8(output.stdout)?)
+            .arg(&self.data().manifest_path);
+        command
     }
+}
+
+pub(crate) fn output(command: &mut Command) -> Result<String> {
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "{command:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 pub(crate) fn dependency_name(dependency: &Dependency) -> &str {

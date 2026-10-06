@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -8,7 +8,10 @@ use cargo_metadata::Target;
 use flate2::read::GzDecoder;
 use ra_ap_syntax::{AstNode, ast, syntax_editor::SyntaxEditor};
 
-use crate::{Edition, Package, Result, Source, fragment, package::edition};
+use crate::{
+    Edition, Package, Result, Source, fragment,
+    package::{edition, output},
+};
 
 const OWNER: &str = "Source directory prepared by override.\n";
 const MARKER: &str = ".override-source";
@@ -29,7 +32,7 @@ pub struct Entry {
 impl Package {
     pub fn prepare(&self, destination: impl AsRef<Path>) -> Result<Sources> {
         let source = fs::canonicalize(self.directory())?;
-        let mut files = BTreeSet::new();
+        let mut files = BTreeMap::new();
         let mut archive = None;
         if let Some(registry) = self.data().source.as_ref().and_then(|source| {
             source.repr.strip_prefix("registry+").or_else(|| {
@@ -48,7 +51,7 @@ impl Package {
                         .as_object()
                         .ok_or("directory source has no file list")?
                         .keys()
-                        .map(PathBuf::from),
+                        .map(|name| (PathBuf::from(name), source.join(name))),
                 );
                 println!("cargo::rerun-if-changed={}", checksum.display());
             } else {
@@ -99,17 +102,31 @@ impl Package {
                 println!("cargo::rerun-if-changed={}", path.display());
             }
         } else {
-            let listing = self.command(&[
-                "package",
-                "--list",
-                "--allow-dirty",
-                "--package",
-                self.data().name.as_ref(),
-            ])?;
-            files.extend(listing.lines().map(PathBuf::from));
-            if source.join(".cargo_vcs_info.json").is_file() {
-                files.insert(".cargo_vcs_info.json".into());
-            }
+            let listing = output(
+                self.command(&[
+                    "-Z",
+                    "unstable-options",
+                    "package",
+                    "--list",
+                    "--allow-dirty",
+                    "--message-format=json",
+                    "--package",
+                    self.data().name.as_ref(),
+                ])
+                .env("RUSTC_BOOTSTRAP", "1"),
+            )?;
+            let listing: serde_json::Value = serde_json::from_str(&listing)?;
+            files.extend(
+                listing["files"]
+                    .as_object()
+                    .ok_or("package output has no file list")?
+                    .iter()
+                    .filter_map(|(name, file)| {
+                        file["path"]
+                            .as_str()
+                            .map(|path| (PathBuf::from(name), PathBuf::from(path)))
+                    }),
+            );
         }
         let destination = destination.as_ref();
         if destination.try_exists()? && fs::symlink_metadata(destination)?.file_type().is_symlink()
@@ -164,32 +181,15 @@ impl Package {
                 }
             }
         }
-        let external = [self.data().readme(), self.data().license_file()];
-        for relative in files {
+        for (relative, original) in files {
             relative_path(&relative)?;
-            let mut original = source.join(&relative);
             if original.starts_with(&destination) {
                 continue;
             }
-            if relative == Path::new("Cargo.toml.orig") && !original.try_exists()? {
-                original = self.data().manifest_path.as_std_path().to_owned();
-            }
-            if !original.try_exists()? {
-                if let Some(path) = external
-                    .iter()
-                    .flatten()
-                    .find(|path| Path::new(path.file_name().unwrap_or_default()) == relative)
-                {
-                    original = path.as_std_path().to_owned();
-                } else if relative == Path::new("Cargo.lock")
-                    || relative == Path::new(".cargo_vcs_info.json")
-                {
-                    continue;
-                }
-            }
             let output = destination.join(&relative);
             fs::create_dir_all(output.parent().ok_or("source file has no parent")?)?;
-            let mut input = fs::File::open(&original)?;
+            let mut input = fs::File::open(&original)
+                .map_err(|error| format!("{}: {error}", original.display()))?;
             let mut output = fs::File::create(&output)?;
             io::copy(&mut input, &mut output)?;
             #[cfg(unix)]
