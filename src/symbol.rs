@@ -318,12 +318,20 @@ fn lookup(
     visited: &mut HashSet<(SyntaxNode, String, Option<Namespace>)>,
 ) -> Vec<Binding> {
     if namespace.is_none() {
-        return unique(
+        let mut bindings = unique(
             [Namespace::Type, Namespace::Value, Namespace::Macro]
                 .into_iter()
                 .flat_map(|namespace| lookup(definitions, context, text, Some(namespace), visited))
                 .collect(),
         );
+        if bindings.iter().any(|binding| binding.unresolved.is_none()) {
+            bindings.retain(|binding| {
+                binding.unresolved.is_none()
+                    || !binding.imports.is_empty()
+                    || !same(&binding.declaration, context)
+            });
+        }
+        return bindings;
     }
     let key = (context.node.clone(), text.to_owned(), namespace);
     if !visited.insert(key.clone()) {
