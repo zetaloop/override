@@ -4,12 +4,13 @@ use ra_ap_syntax::{
     syntax_editor::{Position, SyntaxEditor},
 };
 
-use crate::{Result, Selected, Source, fragment, resolve, source::Location};
+use crate::{Result, Selected, Source, fragment, resolve, source::Location, symbol};
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Options {
     control_flow: bool,
     propagate: bool,
+    outputs: Vec<String>,
 }
 
 impl Selected<'_> {
@@ -20,6 +21,11 @@ impl Selected<'_> {
 
     pub fn propagate(mut self) -> Self {
         self.flow.propagate = true;
+        self
+    }
+
+    pub fn outputs(mut self, names: impl IntoIterator<Item: Into<String>>) -> Self {
+        self.flow.outputs = names.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -219,6 +225,7 @@ impl Container {
 pub(crate) struct Transformed {
     pub body: ast::Expr,
     pub call: ast::Expr,
+    pub binding: Option<ast::Pat>,
     pub return_type: Option<ast::Type>,
     pub declaration: Option<ast::Enum>,
 }
@@ -233,6 +240,35 @@ pub(crate) fn extract(
     options: Options,
 ) -> Result<Transformed> {
     let edition = source.edition();
+    let tail = tail && options.outputs.is_empty();
+    let mut scope = location.clone();
+    scope.region = Some(region.to_vec());
+    let mut bindings: Vec<(String, ast::Pat)> = Vec::new();
+    if !options.outputs.is_empty() {
+        let end = region
+            .last()
+            .and_then(SyntaxElement::next_sibling_or_token)
+            .ok_or("output bindings have no enclosing continuation")?;
+        let mut context = location.at(end.parent().ok_or("output bindings have no scope")?);
+        context.region = Some(vec![end]);
+        for pattern in &options.outputs {
+            let signature = fragment::signature(&format!("fn f({pattern}: ())"), edition)?;
+            let parameter = fragment::one::<ast::Param>(signature.syntax())?;
+            let binding = parameter
+                .pat()
+                .and_then(|pattern| ast::IdentPat::cast(pattern.syntax().clone()))
+                .filter(|binding| binding.ref_token().is_none() && binding.pat().is_none())
+                .ok_or("an output must be a name or mutable binding")?;
+            let name = binding.name().ok_or("output binding has no name")?;
+            let declaration = symbol::binding(source, &context, name.text())?;
+            if !scope.range().contains_range(declaration.range()) {
+                return Err(
+                    format!("output `{name}` is declared outside the selected region").into(),
+                );
+            }
+            bindings.push((name.text().to_owned(), binding.into()));
+        }
+    }
     let (jumps, tries) = exits(location, region)?;
     let container = if !tries.is_empty() && options.propagate {
         let [target] = tries.as_slice() else {
@@ -257,8 +293,6 @@ pub(crate) fn extract(
     }
     let mut exits: Vec<Exit> = Vec::new();
     let mut edits = Vec::new();
-    let mut scope = location.clone();
-    scope.region = Some(region.to_vec());
     let origin = scope.range().start();
     let prefix = if region.first().is_some_and(|element| {
         element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n')
@@ -460,6 +494,27 @@ pub(crate) fn extract(
         .tail_expr()
         .map(|expression| fragment::indent(expression.syntax(), "").to_string())
         .unwrap_or_else(|| "()".to_owned());
+    let result = region
+        .iter()
+        .rfind(|element| !element.kind().is_trivia())
+        .and_then(SyntaxElement::as_node)
+        .is_some_and(|node| ast::Expr::can_cast(node.kind()) && !diverges(node));
+    if !bindings.is_empty() {
+        let mut values = Vec::new();
+        if result {
+            values.push(fragment::expression(&value, edition)?);
+        }
+        values.extend(
+            bindings
+                .iter()
+                .map(|(name, _)| fragment::expression(name, edition))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        value = match values.as_slice() {
+            [value] => value.to_string(),
+            _ => make::expr_tuple(values).to_string(),
+        };
+    }
     let mut call = call.to_string();
     if !exits.is_empty() {
         let ty = if declaration.is_some() {
@@ -508,13 +563,18 @@ pub(crate) fn extract(
         call = format!("match {call} {{\n    {},\n}}", arms.join(",\n    "));
     }
     let transformed = !exits.is_empty() || container.is_some();
-    if transformed && !diverges(block.syntax()) {
+    if (transformed || !bindings.is_empty()) && !diverges(block.syntax()) {
         let (editor, _) = SyntaxEditor::new(body_source.root.clone());
         let value = fragment::expression(&value, edition)?;
         let value = fragment::indent(value.syntax(), "    ");
-        if let Some(tail) = list.tail_expr() {
+        if let Some(tail) = list.tail_expr()
+            && (bindings.is_empty() || result)
+        {
             editor.replace(tail.syntax(), value);
         } else {
+            if let Some(tail) = list.tail_expr() {
+                editor.replace(tail.syntax(), make::expr_stmt(tail.clone()).syntax());
+            }
             let close = list
                 .r_curly_token()
                 .ok_or("extracted body has no closing brace")?;
@@ -535,10 +595,27 @@ pub(crate) fn extract(
         }
         body_source.root = editor.finish().new_root().clone();
     }
+    let binding = if bindings.is_empty() {
+        None
+    } else if result {
+        let patterns = bindings
+            .iter()
+            .map(|(name, _)| format!("_{}", name.trim_start_matches("r#")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        call = format!("match {call} {{ (value, {patterns}) => value }}");
+        None
+    } else {
+        Some(match bindings.as_slice() {
+            [(_, binding)] => binding.clone(),
+            _ => make::tuple_pat(bindings.into_iter().map(|(_, binding)| binding)).into(),
+        })
+    };
     let body = ast::Expr::cast(body_source.root).ok_or("extracted body is not an expression")?;
     Ok(Transformed {
         body,
         call: fragment::expression(&call, edition)?,
+        binding,
         return_type: transformed
             .then(|| fragment::ty(&output, edition))
             .transpose()?,

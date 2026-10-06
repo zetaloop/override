@@ -1004,7 +1004,12 @@ impl Selected<'_> {
                 }
             }
             let generated = body_editor.finish().new_root().clone();
-            let replacement: SyntaxElement = if expression {
+            let replacement: SyntaxElement = if let Some(binding) = transformed.binding {
+                make::let_stmt(binding, None, Some(call))
+                    .syntax()
+                    .clone()
+                    .into()
+            } else if expression {
                 call.syntax().clone().into()
             } else {
                 make::expr_stmt(call).syntax().clone().into()

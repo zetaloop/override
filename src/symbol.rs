@@ -636,6 +636,29 @@ pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -
     }
 }
 
+pub(crate) fn binding(source: &Source, context: &Location, name: &str) -> Result<Location> {
+    let definitions = resolve::declarations(source)
+        .into_iter()
+        .map(|(_, location)| location)
+        .collect::<Vec<_>>();
+    let candidates = lookup(
+        &definitions,
+        context,
+        name,
+        Some(Namespace::Value),
+        &mut HashSet::new(),
+    );
+    match candidates.as_slice() {
+        [binding]
+            if binding.unresolved.is_none()
+                && ast::IdentPat::can_cast(binding.declaration.node.kind()) =>
+        {
+            Ok(binding.declaration.clone())
+        }
+        _ => Err(format!("declaration of binding `{name}` is unavailable or ambiguous").into()),
+    }
+}
+
 pub(crate) fn declaration(source: &Source, scope: &Location) -> Result<Location> {
     let name = scope.symbol.as_deref().ok_or("selection has no symbol")?;
     let definitions = resolve::declarations(source)

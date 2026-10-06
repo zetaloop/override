@@ -190,7 +190,7 @@ impl Selected<'_> {
             return Err("a symbol selection supports redirection".into());
         }
         if self.flow != flow::Options::default() {
-            return Err("control-flow options require extraction".into());
+            return Err("extraction options require extract()".into());
         }
         if self.position.is_some() {
             return Err("an insertion position requires adding a member".into());
