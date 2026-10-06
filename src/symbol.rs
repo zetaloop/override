@@ -89,7 +89,7 @@ fn scopes(location: &Location) -> Vec<Location> {
                 SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST | SyntaxKind::STMT_LIST
             ) && !(location.parents.last().is_some_and(|frame| {
                 node == &location.root
-                    || (frame.block && node.parent().as_ref() == Some(&location.root))
+                    || (frame.delimited && node.parent().as_ref() == Some(&location.root))
             }))
         })
         .map(|node| location.at(node))

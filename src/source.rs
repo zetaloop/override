@@ -200,10 +200,9 @@ impl Selected<'_> {
         let mut root = editor.finish().new_root().clone();
         for parent in self.location.parents.iter().rev() {
             let text = root.to_string();
-            let body = if parent.block {
-                text.strip_prefix('{')
-                    .and_then(|text| text.strip_suffix('}'))
-                    .ok_or("macro block has no delimiters")?
+            let body = if parent.delimited {
+                text.get(1..text.len().saturating_sub(1))
+                    .ok_or("macro fragment has no delimiters")?
             } else {
                 &text
             };
@@ -274,7 +273,8 @@ impl Location {
         self.parents
             .iter()
             .map(|frame| {
-                frame.tree.syntax().text_range().start() + TextSize::from(u32::from(!frame.block))
+                frame.tree.syntax().text_range().start()
+                    + TextSize::from(u32::from(!frame.delimited))
             })
             .sum()
     }
@@ -353,14 +353,17 @@ impl Location {
                 .map(|root| (root, false))
                 .or_else(|_| {
                     fragment::expression(&format!("{{{body}}}"), edition)
-                        .map(|block| (block.syntax().clone(), true))
+                        .or_else(|_| fragment::expression(&format!("({body})"), edition))
+                        .map(|expression| (expression.syntax().clone(), true))
                 });
-            let Ok((root, block)) = parsed else { continue };
+            let Ok((root, delimited)) = parsed else {
+                continue;
+            };
             let mut parents = self.parents.clone();
             parents.push(MacroFrame {
                 root: self.root.clone(),
                 tree,
-                block,
+                delimited,
             });
             Self {
                 root: root.clone(),
@@ -382,5 +385,5 @@ impl Location {
 pub(crate) struct MacroFrame {
     pub root: SyntaxNode,
     pub tree: ast::TokenTree,
-    pub block: bool,
+    pub delimited: bool,
 }
