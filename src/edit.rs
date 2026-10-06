@@ -49,6 +49,17 @@ impl Selected<'_> {
         })
     }
 
+    pub fn set_binding(self, binding: &str) -> Result<()> {
+        self.edit(|editor, node, edition| {
+            if !ast::IdentPat::can_cast(node.kind()) {
+                return Err("selected object is not a binding".into());
+            }
+            let binding = fragment::binding(binding, edition)?;
+            editor.replace(node, binding.syntax());
+            Ok(())
+        })
+    }
+
     pub fn set_visibility(self, visibility: &str) -> Result<()> {
         self.edit(|editor, node, edition| {
             if !matches!(

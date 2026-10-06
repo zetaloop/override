@@ -252,13 +252,10 @@ pub(crate) fn extract(
         let mut context = location.at(end.parent().ok_or("output bindings have no scope")?);
         context.region = Some(vec![end]);
         for pattern in &options.outputs {
-            let signature = fragment::signature(&format!("fn f({pattern}: ())"), edition)?;
-            let parameter = fragment::one::<ast::Param>(signature.syntax())?;
-            let binding = parameter
-                .pat()
-                .and_then(|pattern| ast::IdentPat::cast(pattern.syntax().clone()))
-                .filter(|binding| binding.ref_token().is_none() && binding.pat().is_none())
-                .ok_or("an output must be a name or mutable binding")?;
+            let binding = fragment::binding(pattern, edition)?;
+            if binding.ref_token().is_some() || binding.pat().is_some() {
+                return Err("an output must be a name or mutable binding".into());
+            }
             let name = binding.name().ok_or("output binding has no name")?;
             let declaration = symbol::binding(source, &context, name.text())?;
             if !scope.range().contains_range(declaration.range()) {

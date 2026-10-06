@@ -80,6 +80,14 @@ pub(crate) fn signature(text: &str, edition: Edition) -> Result<ast::Fn> {
     Ok(function)
 }
 
+pub(crate) fn binding(text: &str, edition: Edition) -> Result<ast::IdentPat> {
+    let function = signature(&format!("fn f({text}: ())"), edition)?;
+    one::<ast::Param>(function.syntax())?
+        .pat()
+        .and_then(|pattern| ast::IdentPat::cast(pattern.syntax().clone()))
+        .ok_or_else(|| "expected a named binding".into())
+}
+
 pub(crate) fn path(text: &str, edition: Edition) -> Result<ast::Path> {
     match expression(text, edition)? {
         ast::Expr::PathExpr(path) => path.path().ok_or_else(|| "missing path".into()),

@@ -179,6 +179,7 @@ source.select(item("run"))?.add_attribute("#[inline]")?;
 | Operation | Input and effect |
 | :--- | :--- |
 | `rename("name")` | Changes a declaration name or import alias |
+| `set_binding("mut value")` | Changes a selected named binding's pattern, including its `mut`, `ref` or `@` modifiers |
 | `set_visibility("pub(crate)")` | Changes declaration visibility; `""` selects private visibility |
 | `add_attribute("#[inline]")` | Adds an attribute before the declaration header |
 | `add_field("field: Type")` | Adds a declaration field; on a record expression, accepts an initializer such as `"field: value"` |
@@ -375,6 +376,12 @@ let (name, mut count) = parse_name(raw);
 ```
 
 Each entry is an identifier with an optional `mut`. The name is associated with its visible declaration at the end of the region; that declaration must belong to the selected code. The receiver's mutability is explicit because mutation may occur on different sides of the extraction.
+
+The helper's declarations can be edited through the same binding selectors. For example, extracting only `let mut count = 1;` into `seed` leaves mutation at the call site. The helper's binding then becomes immutable:
+
+```rust
+source.select(item("seed").binding("count"))?.set_binding("count")?;
+```
 
 A single output uses its own return type. Multiple outputs use a tuple in the listed order. When the selected code also yields an ordinary expression result, that result occupies the first tuple element, followed by the outputs. The original expression receives that leading value.
 
