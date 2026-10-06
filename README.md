@@ -2,9 +2,9 @@
 
 Symbol-based Rust source editing and dependency patching. Bridge crates prepare dependency sources, apply patches, and compile the result with their own Cargo configuration.
 
-The crate is imported as `r#override`. Use `default-features = false` for the editor without Cargo integration.
+Queries identify Rust declarations, calls and their relationships. Edits use Rust fragments such as field declarations, types and function signatures. This makes patches follow the structure they depend on as upstream source changes.
 
-## Editing
+The crate is imported as `r#override`. The editor can be used independently with `default-features = false`; the default `build` feature provides Cargo integration.
 
 ```rust
 use r#override::{Edition, Result, Source, item};
@@ -17,45 +17,12 @@ fn main() -> Result<()> {
 }
 ```
 
-[examples/edit.rs](examples/edit.rs) adds a repeat command to a dispatcher by extracting and reusing its output logic. It prints a Rust program accepting a message and repeat count.
+## Documentation
 
-Regions depend on source order: new upstream code between their anchors becomes part of the selection. Prefer whole functions, loops or branches when possible. Extraction creates a new scope; the supplied signature and arguments must account for ownership and local destruction.
-
-## Bridge crates
-
-A source dependency can be declared under an inactive target:
-
-```toml
-[target.'cfg(any())'.dependencies]
-upstream = { package = "ra_ap_ide_assists", version = "=0.0.352" }
-```
-
-With `override` as a build dependency, `build.rs` can prepare the source:
-
-```rust
-use std::{env, path::PathBuf};
-use r#override::{Package, Result};
-
-fn main() -> Result<()> {
-    let upstream = Package::current()?.dependency("upstream")?;
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let mut sources = upstream.prepare(out.join("upstream"))?;
-    sources.include(upstream.library()?)?.emit("UPSTREAM_SOURCE")?;
-    Ok(())
-}
-```
-
-The bridge's `src/lib.rs`:
-
-```rust
-include!(env!("UPSTREAM_SOURCE"));
-```
-
-Crate-level attributes belong in the bridge root because `include!` rejects inner attributes. Cargo metadata resolves the bridge's workspace, which may differ from its consumer's dependency graph; the bridge should fix its source dependency's version and origin.
-
-Cargo metadata omits source-replacement settings. When importing a graph with `Package::from_metadata`, use `.config(...)` to supply the corresponding configuration before preparing registry archives.
-
-Reusing an upstream `build.rs` requires a helper build dependency to prepare it before the bridge script is compiled. Its exported include macro uses the bridge's features and package environment; relative resource paths resolve against the prepared source. [tests/build.rs](tests/build.rs) contains a complete bridge workspace with this arrangement and dependency replacement.
+- [Editing Rust](docs/editing.md): selecting targets, supplying declarations, changing source and reusing upstream logic.
+- [Bridge crates](docs/bridges.md): preparing dependency sources and compiling them through a Cargo package.
+- [Editing example](examples/edit.rs): extending a command dispatcher by reusing its output implementation.
+- [Bridge example](tests/build.rs): a runnable workspace with dependency replacement and a shared upstream build script.
 
 ## Development
 
