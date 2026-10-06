@@ -5,7 +5,12 @@ use ra_ap_syntax::{
     ast::{HasGenericArgs, HasName, HasTypeBounds},
 };
 
-use crate::{Result, Source, fragment, select::arguments, source::Location};
+use crate::{
+    Result, Source, fragment,
+    select::arguments,
+    source::Location,
+    symbol::{self, Namespace},
+};
 
 pub(crate) fn symbol(text: &str, edition: Edition) -> Result<String> {
     match fragment::ty(text, edition)? {
@@ -418,64 +423,20 @@ fn expression_type(location: &Location, expression: &ast::Expr) -> Option<ast::T
                     .find_map(ast::Impl::cast)?
                     .self_ty();
             }
-            for ancestor in location.ancestors() {
-                let parameters = ast::Fn::cast(ancestor.clone())
-                    .and_then(|function| function.param_list())
-                    .or_else(|| {
-                        ast::ClosureExpr::cast(ancestor.clone())
-                            .and_then(|closure| closure.param_list())
-                    });
-                if let Some(parameters) = parameters {
-                    for parameter in parameters.params() {
-                        if parameter
-                            .pat()
-                            .is_some_and(|pattern| pattern_names(&pattern).contains(&name))
-                        {
-                            return match parameter.pat()? {
-                                ast::Pat::IdentPat(pattern)
-                                    if pattern
-                                        .name()
-                                        .is_some_and(|binding| binding.text() == name) =>
-                                {
-                                    parameter.ty()
-                                }
-                                _ => None,
-                            };
-                        }
-                    }
-                }
-                if let Some(list) = ast::StmtList::cast(ancestor) {
-                    let binding = list
-                        .statements()
-                        .filter_map(|statement| match statement {
-                            ast::Stmt::LetStmt(binding) => Some(binding),
-                            _ => None,
-                        })
-                        .filter(|binding| {
-                            location.at(binding.syntax().clone()).range().end()
-                                <= location.at(expression.syntax().clone()).range().start()
-                        })
-                        .filter(|binding| {
-                            binding
-                                .pat()
-                                .is_some_and(|pattern| pattern_names(&pattern).contains(&name))
-                        })
-                        .last();
-                    if let Some(binding) = binding {
-                        if !binding.pat().is_some_and(|pattern| matches!(pattern, ast::Pat::IdentPat(pattern) if pattern.name().is_some_and(|binding| binding.text() == name))) { return None; }
-                        if let Some(ty) = binding.ty() {
-                            return Some(ty);
-                        }
-                        if let Some(initializer) = binding.initializer() {
-                            return expression_type(
-                                &location.at(initializer.syntax().clone()),
-                                &initializer,
-                            );
-                        }
-                    }
-                }
+            let (binding, _) = symbol::locals(
+                &location.at(expression.syntax().clone()),
+                &name,
+                Some(Namespace::Value),
+            )?;
+            let parent = binding.node.parent()?;
+            if let Some(parameter) = ast::Param::cast(parent.clone()) {
+                return parameter.ty();
             }
-            None
+            let declaration = ast::LetStmt::cast(parent)?;
+            declaration.ty().or_else(|| {
+                let initializer = declaration.initializer()?;
+                expression_type(&binding.at(initializer.syntax().clone()), &initializer)
+            })
         }
         _ => None,
     }
@@ -857,78 +818,38 @@ fn call_declaration(
                 return Err("cyclic callable binding".into());
             }
             let head = name.split("::").next().ok_or("empty callable name")?;
+            let namespace = if name == head {
+                Namespace::Value
+            } else {
+                Namespace::Type
+            };
+            let local = symbol::locals(&reference, head, Some(namespace));
             for ancestor in reference.ancestors() {
-                if name == head {
-                    if let Some(list) = ast::StmtList::cast(ancestor.clone()) {
-                        let binding = list
-                            .statements()
-                            .filter_map(|statement| match statement {
-                                ast::Stmt::LetStmt(binding) => Some(binding),
-                                _ => None,
-                            })
-                            .filter(|binding| {
-                                reference.at(binding.syntax().clone()).range().end()
-                                    <= reference.range().start()
-                            })
-                            .filter(|binding| {
-                                binding.pat().is_some_and(|pattern| {
-                                    pattern_names(&pattern)
-                                        .iter()
-                                        .any(|binding| binding == &name)
-                                })
-                            })
-                            .last();
-                        if let Some(binding) = binding {
-                            if let Some(ast::Pat::IdentPat(pattern)) = binding.pat()
-                                && pattern.name().is_some_and(|binding| binding.text() == name)
-                                && let Some(ast::Expr::PathExpr(path)) = binding.initializer()
-                                && let Some(path) = path.path()
-                            {
-                                name = path_name(&path);
-                                reference = reference.at(path.syntax().clone());
-                                continue 'reference;
-                            }
-                            return Err(format!(
-                                "`{name}` is a local callable value; supply its declaration"
-                            )
-                            .into());
-                        }
-                    }
-                    if ancestor
-                        .children()
-                        .filter_map(ast::ParamList::cast)
-                        .flat_map(|parameters| parameters.params())
-                        .any(|parameter| {
-                            parameter.pat().is_some_and(|pattern| {
-                                pattern_names(&pattern)
-                                    .iter()
-                                    .any(|binding| binding == &name)
-                            })
-                        })
-                    {
+                if let Some((binding, owner)) = &local
+                    && *owner == ancestor
+                {
+                    if namespace == Namespace::Type {
                         return Err(format!(
-                            "`{name}` is a callable parameter; supply its declaration"
+                            "`{name}` depends on a generic type; supply its declaration"
                         )
                         .into());
                     }
-                }
-                if name != head
-                    && ancestor
-                        .children()
-                        .filter_map(ast::GenericParamList::cast)
-                        .flat_map(|parameters| parameters.generic_params())
-                        .any(|parameter| {
-                            parameter
-                                .syntax()
-                                .children()
-                                .find_map(ast::Name::cast)
-                                .is_some_and(|parameter| parameter.text() == head)
-                        })
-                {
-                    return Err(format!(
-                        "`{name}` depends on a generic type; supply its declaration"
-                    )
-                    .into());
+                    let parent = binding.node.parent();
+                    if let Some(declaration) = parent.clone().and_then(ast::LetStmt::cast)
+                        && let Some(ast::Expr::PathExpr(path)) = declaration.initializer()
+                        && let Some(path) = path.path()
+                    {
+                        name = path_name(&path);
+                        reference = binding.at(path.syntax().clone());
+                        continue 'reference;
+                    }
+                    let description =
+                        if parent.is_some_and(|node| ast::Param::can_cast(node.kind())) {
+                            "a callable parameter"
+                        } else {
+                            "a local callable value"
+                        };
+                    return Err(format!("`{name}` is {description}; supply its declaration").into());
                 }
                 if ancestor.kind() == SyntaxKind::STMT_LIST {
                     let local = ancestor.children().find(|node| {

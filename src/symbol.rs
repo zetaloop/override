@@ -8,7 +8,7 @@ use ra_ap_syntax::{
 use crate::{Result, Selected, Source, flow, fragment, resolve, source::Location};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Namespace {
+pub(crate) enum Namespace {
     Type,
     Value,
     Macro,
@@ -170,7 +170,7 @@ fn unique(bindings: Vec<Binding>) -> Vec<Binding> {
     output
 }
 
-fn locals(
+pub(crate) fn locals(
     context: &Location,
     expected: &str,
     namespace: Option<Namespace>,
@@ -276,8 +276,8 @@ fn locals(
                         binding
                             .syntax()
                             .ancestors()
-                            .skip(1)
                             .take_while(|parent| parent != condition.syntax())
+                            .skip(1)
                             .all(|parent| {
                                 matches!(
                                     parent.kind(),
