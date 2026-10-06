@@ -1,4 +1,9 @@
-use std::{env, fs, path::Path, process::Command, sync::Arc};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+};
 
 use cargo_metadata::{
     CargoOpt, Dependency, Metadata, MetadataCommand, PackageId, Target, TargetKind,
@@ -11,6 +16,7 @@ pub struct Package {
     pub(crate) graph: Arc<Metadata>,
     pub(crate) index: usize,
     pub(crate) alias: Option<String>,
+    pub(crate) context: PathBuf,
 }
 
 impl Package {
@@ -20,9 +26,10 @@ impl Package {
 
     pub fn load(manifest: impl AsRef<Path>) -> Result<Self> {
         let manifest = fs::canonicalize(manifest)?;
+        let context = manifest.parent().ok_or("manifest has no parent")?;
         let graph = MetadataCommand::new()
             .manifest_path(&manifest)
-            .current_dir(manifest.parent().ok_or("manifest has no parent")?)
+            .current_dir(context)
             .features(CargoOpt::AllFeatures)
             .exec()?;
         let index = graph
@@ -36,6 +43,7 @@ impl Package {
             graph: Arc::new(graph),
             index,
             alias: None,
+            context: context.to_owned(),
         })
     }
 
@@ -46,6 +54,7 @@ impl Package {
             .position(|package| package.id == *id)
             .ok_or_else(|| format!("Cargo metadata has no package `{id}`"))?;
         Ok(Self {
+            context: graph.workspace_root.as_std_path().to_owned(),
             graph: Arc::new(graph),
             index,
             alias: None,
@@ -216,6 +225,7 @@ impl Package {
                 graph: self.graph.clone(),
                 index: *index,
                 alias: Some(dependency_name(dependency).to_owned()),
+                context: self.context.clone(),
             })),
             [] => Ok(None),
             _ => Err(format!(

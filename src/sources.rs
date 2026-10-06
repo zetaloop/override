@@ -5,6 +5,7 @@ use std::{
 };
 
 use cargo_metadata::Target;
+use flate2::read::GzDecoder;
 use ra_ap_syntax::{AstNode, ast, syntax_editor::SyntaxEditor};
 
 use crate::{Edition, Package, Result, Source, fragment, package::edition};
@@ -29,28 +30,73 @@ impl Package {
     pub fn prepare(&self, destination: impl AsRef<Path>) -> Result<Sources> {
         let source = fs::canonicalize(self.directory())?;
         let mut files = BTreeSet::new();
-        if self
-            .data()
-            .source
-            .as_ref()
-            .is_some_and(|source| source.repr.starts_with("registry+"))
-        {
-            let mut directories = vec![PathBuf::new()];
-            while let Some(directory) = directories.pop() {
-                for entry in fs::read_dir(source.join(&directory))? {
-                    let entry = entry?;
-                    let relative = directory.join(entry.file_name());
-                    if relative == Path::new(".cargo-ok")
-                        || relative == Path::new(".cargo-checksum.json")
-                    {
-                        continue;
+        let mut archive = None;
+        if let Some(registry) = self.data().source.as_ref().and_then(|source| {
+            source.repr.strip_prefix("registry+").or_else(|| {
+                source
+                    .repr
+                    .starts_with("sparse+")
+                    .then_some(source.repr.as_str())
+            })
+        }) {
+            let checksum = source.join(".cargo-checksum.json");
+            if checksum.try_exists()? {
+                let metadata: serde_json::Value =
+                    serde_json::from_reader(fs::File::open(&checksum)?)?;
+                files.extend(
+                    metadata["files"]
+                        .as_object()
+                        .ok_or("directory source has no file list")?
+                        .keys()
+                        .map(PathBuf::from),
+                );
+                println!("cargo::rerun-if-changed={}", checksum.display());
+            } else {
+                let config = cargo_config2::Config::load_with_cwd(&self.context)?;
+                let mut configured = config.source.iter().find_map(|(name, source)| {
+                    (source.registry.as_deref() == Some(registry)
+                        || name == "crates-io"
+                            && matches!(
+                                registry,
+                                "https://github.com/rust-lang/crates.io-index"
+                                    | "sparse+https://index.crates.io/"
+                            ))
+                    .then_some(source)
+                });
+                let mut visited = BTreeSet::new();
+                while let Some(name) = configured.and_then(|source| source.replace_with.as_deref())
+                {
+                    if !visited.insert(name) {
+                        return Err(format!("cyclic source replacement at `{name}`").into());
                     }
-                    if entry.file_type()?.is_dir() {
-                        directories.push(relative);
-                    } else {
-                        files.insert(relative);
-                    }
+                    configured = config.source.get(name);
                 }
+                let directory = if let Some(directory) =
+                    configured.and_then(|source| source.local_registry.as_ref())
+                {
+                    directory.clone()
+                } else {
+                    let registry = source.parent().ok_or("source has no registry directory")?;
+                    registry
+                        .parent()
+                        .and_then(Path::parent)
+                        .ok_or("source has no registry root")?
+                        .join("cache")
+                        .join(
+                            registry
+                                .file_name()
+                                .ok_or("registry directory has no name")?,
+                        )
+                };
+                let path = directory.join(format!(
+                    "{}-{}.crate",
+                    self.data().name,
+                    self.data().version
+                ));
+                let input = fs::File::open(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                archive = Some(tar::Archive::new(GzDecoder::new(input)));
+                println!("cargo::rerun-if-changed={}", path.display());
             }
         } else {
             let listing = self.command(&[
@@ -61,6 +107,9 @@ impl Package {
                 self.data().name.as_ref(),
             ])?;
             files.extend(listing.lines().map(PathBuf::from));
+            if source.join(".cargo_vcs_info.json").is_file() {
+                files.insert(".cargo_vcs_info.json".into());
+            }
         }
         let destination = destination.as_ref();
         if destination.try_exists()? && fs::symlink_metadata(destination)?.file_type().is_symlink()
@@ -89,8 +138,31 @@ impl Package {
             fs::create_dir(&destination)?;
         }
         fs::write(destination.join(MARKER), OWNER)?;
-        if source.join(".cargo_vcs_info.json").is_file() {
-            files.insert(".cargo_vcs_info.json".into());
+        if let Some(mut archive) = archive {
+            let prefix = format!("{}-{}", self.data().name, self.data().version);
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if entry.header().entry_type().is_dir() {
+                    continue;
+                }
+                if !entry.header().entry_type().is_file() {
+                    return Err("package archive contains a non-file entry".into());
+                }
+                let path = entry.path()?;
+                let relative = path.strip_prefix(&prefix)?;
+                relative_path(relative)?;
+                let output = destination.join(relative);
+                fs::create_dir_all(output.parent().ok_or("source file has no parent")?)?;
+                let mut output = fs::File::create(output)?;
+                io::copy(&mut entry, &mut output)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    output.set_permissions(fs::Permissions::from_mode(
+                        entry.header().mode()? | 0o200,
+                    ))?;
+                }
+            }
         }
         let external = [self.data().readme(), self.data().license_file()];
         for relative in files {

@@ -8,14 +8,18 @@ repository = "https://github.com/zetaloop/override"
 license = "MIT"
 
 [dependencies]
+cargo-config2 = { version = "0.1.45", optional = true }
 cargo_metadata = { version = "0.23.1", optional = true }
+flate2 = { version = "1.1.10", optional = true }
 ra_ap_syntax = "0.0.357"
+serde_json = { version = "1.0.151", optional = true }
+tar = { version = "0.4.46", optional = true }
 toml = { version = "1.1.6", optional = true }
 unicode-ident = "=1.0.24"
 
 [features]
 default = ["build"]
-build = ["dep:cargo_metadata", "dep:toml"]
+build = ["dep:cargo-config2", "dep:cargo_metadata", "dep:flate2", "dep:serde_json", "dep:tar", "dep:toml"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
