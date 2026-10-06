@@ -28,19 +28,12 @@ impl Package {
             .current_dir(context)
             .features(CargoOpt::AllFeatures)
             .exec()?;
-        let index = graph
-            .packages
-            .iter()
-            .position(|package| {
-                fs::canonicalize(&package.manifest_path).is_ok_and(|path| path == manifest)
-            })
-            .ok_or_else(|| format!("Cargo metadata has no package at {}", manifest.display()))?;
-        Ok(Self {
-            graph: Arc::new(graph),
-            index,
-            alias: None,
-            config: Some(Arc::new(Config::load_with_cwd(context)?.source)),
-        })
+        let id = graph
+            .root_package()
+            .ok_or_else(|| format!("Cargo metadata has no package at {}", manifest.display()))?
+            .id
+            .clone();
+        Ok(Self::from_metadata(graph, &id)?.config(Config::load_with_cwd(context)?))
     }
 
     pub fn from_metadata(graph: Metadata, id: &PackageId) -> Result<Self> {
