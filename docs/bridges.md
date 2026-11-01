@@ -85,7 +85,7 @@ sources.edit("src/lib.rs", |source| {
 })?;
 ```
 
-This is the constant edit used by the [bridge workspace example](../tests/build.rs). Queries use the declarations present in the selected upstream package.
+Queries use the declarations present in the selected upstream package.
 
 For declarations spread across files:
 
@@ -255,5 +255,3 @@ fn main() {
 ```
 
 The included script uses the bridge's features and package environment. Relative resources such as `include_str!("config.txt")` are resolved from the prepared source file; the script's working directory and `CARGO_MANIFEST_DIR` refer to the bridge.
-
-[tests/build.rs](../tests/build.rs) constructs and runs this arrangement, including dependency replacement, a source edit and a resource change between builds.

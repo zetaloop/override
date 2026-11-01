@@ -19,6 +19,3 @@ toml = { version = "1.1.8", optional = true }
 [features]
 default = ["build"]
 build = ["dep:cargo-config2", "dep:cargo_metadata", "dep:flate2", "dep:serde_json", "dep:tar", "dep:toml"]
-
-[dev-dependencies]
-tempfile = "3.27.0"

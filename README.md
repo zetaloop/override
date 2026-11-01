@@ -22,7 +22,6 @@ fn main() -> Result<()> {
 - [Editing Rust](docs/editing.md): selecting targets, supplying declarations, changing source and reusing upstream logic.
 - [Bridge crates](docs/bridges.md): preparing dependency sources and compiling them through a Cargo package.
 - [Editing example](examples/edit.rs): extending a command dispatcher by reusing its output implementation.
-- [Bridge example](tests/build.rs): a runnable workspace with dependency replacement and a shared upstream build script.
 
 ## Development
 
@@ -31,5 +30,4 @@ cargo fmt
 cargo fix --allow-dirty
 cargo clippy --fix --allow-dirty --all-targets -- -D warnings
 cargo clippy --no-default-features --all-targets -- -D warnings
-cargo test
 ```
