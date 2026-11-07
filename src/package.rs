@@ -11,7 +11,6 @@ use crate::{Config, Edition, Result};
 pub struct Package {
     pub(crate) graph: Arc<Metadata>,
     pub(crate) index: usize,
-    pub(crate) alias: Option<String>,
     pub(crate) config: Option<Arc<BTreeMap<String, SourceConfigValue>>>,
 }
 
@@ -45,7 +44,6 @@ impl Package {
         Ok(Self {
             graph: Arc::new(graph),
             index,
-            alias: None,
             config: None,
         })
     }
@@ -218,7 +216,6 @@ impl Package {
             [index] => Ok(Some(Self {
                 graph: self.graph.clone(),
                 index: *index,
-                alias: Some(dependency_name(dependency).to_owned()),
                 config: self.config.clone(),
             })),
             [] => Ok(None),
@@ -228,22 +225,6 @@ impl Package {
             )
             .into()),
         }
-    }
-
-    pub(crate) fn manifest(&self) -> Result<toml::Table> {
-        Ok(toml::from_str(&fs::read_to_string(
-            &self.data().manifest_path,
-        )?)?)
-    }
-
-    pub(crate) fn workspace_manifest(&self) -> Result<std::path::PathBuf> {
-        let text = output(&mut self.command(&[
-            "locate-project",
-            "--workspace",
-            "--message-format",
-            "plain",
-        ]))?;
-        Ok(text.trim().into())
     }
 
     pub(crate) fn command(&self, arguments: &[&str]) -> Command {

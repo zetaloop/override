@@ -6,10 +6,9 @@ use std::{
 
 use cargo_metadata::Target;
 use flate2::read::GzDecoder;
-use ra_ap_syntax::{AstNode, ast, syntax_editor::SyntaxEditor};
 
 use crate::{
-    Edition, Package, Result, Source, fragment,
+    Edition, Manifest, Package, Result, Source,
     package::{edition, output},
 };
 
@@ -19,13 +18,6 @@ const MARKER: &str = ".override-source";
 pub struct Sources {
     package: Package,
     directory: PathBuf,
-    edition: Edition,
-}
-
-pub struct Entry {
-    pub path: PathBuf,
-    /// `include!` rejects inner attributes; these belong in the bridge's crate root.
-    pub attributes: String,
     edition: Edition,
 }
 
@@ -53,7 +45,6 @@ impl Package {
                         .keys()
                         .map(|name| (PathBuf::from(name), source.join(name))),
                 );
-                println!("cargo::rerun-if-changed={}", checksum.display());
             } else {
                 let config = self.config.as_ref().ok_or(
                     "registry source configuration is unavailable; supply it with config()",
@@ -101,7 +92,6 @@ impl Package {
                 let input = fs::File::open(&path)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 archive = Some(tar::Archive::new(GzDecoder::new(input)));
-                println!("cargo::rerun-if-changed={}", path.display());
             }
         } else {
             let listing = output(
@@ -201,20 +191,7 @@ impl Package {
                     input.metadata()?.permissions().mode() | 0o200,
                 ))?;
             }
-            println!("cargo::rerun-if-changed={}", original.display());
         }
-        if !destination.starts_with(&source) && self.data().source.is_none() {
-            println!("cargo::rerun-if-changed={}", source.display());
-        }
-        println!("cargo::rerun-if-changed={}", self.data().manifest_path);
-        println!(
-            "cargo::rerun-if-changed={}",
-            self.graph.workspace_root.join("Cargo.toml")
-        );
-        println!(
-            "cargo::rerun-if-changed={}",
-            self.graph.workspace_root.join("Cargo.lock")
-        );
         Ok(Sources {
             package: self.clone(),
             directory: destination,
@@ -264,73 +241,11 @@ impl Sources {
         Ok(())
     }
 
-    pub fn include(&mut self, target: &Target) -> Result<Entry> {
-        if !self.package.data().targets.contains(target) {
-            return Err("target belongs to a different package".into());
-        }
-        let relative = target
-            .src_path
-            .as_std_path()
-            .strip_prefix(self.package.directory())?;
-        let path = self.path(relative)?;
-        let edition = edition(target.edition)?;
-        let original = fs::read_to_string(&path)?;
-        let source = fragment::file(&original, edition)?;
-        let (editor, root) = SyntaxEditor::new(source);
-        let mut attributes = String::new();
-        for attribute in root
-            .children()
-            .filter_map(ast::AnyAttr::cast)
-            .filter(|attribute| attribute.kind() == ast::AttrKind::Inner)
-        {
-            attributes.push_str(&attribute.syntax().to_string());
-            attributes.push('\n');
-            editor.delete(attribute.syntax());
-        }
-        if let Some(token) = root
-            .first_token()
-            .filter(|token| token.kind() == ra_ap_syntax::SyntaxKind::SHEBANG)
-        {
-            editor.delete(token);
-        }
-        let body = editor.finish().new_root().to_string();
-        if body != original {
-            fs::write(&path, body)?;
-        }
-        Ok(Entry {
-            path,
-            attributes,
-            edition,
-        })
-    }
-}
-
-impl Entry {
-    pub fn emit(&self, name: &str) -> Result<()> {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err("invalid environment variable name".into());
-        }
-        let path = self.path.to_str().ok_or("entry path is not UTF-8")?;
-        if path.contains(['\n', '\r']) {
-            return Err("entry path contains a line break".into());
-        }
-        println!("cargo::rustc-env={name}={path}");
-        Ok(())
-    }
-
-    pub fn export(&self, name: &str, destination: impl AsRef<Path>) -> Result<()> {
-        fragment::name(name, self.edition)?;
-        let path = self.path.to_str().ok_or("entry path is not UTF-8")?;
-        fs::write(
-            destination,
-            format!(
-                "#[macro_export]\nmacro_rules! {name} {{\n    () => {{ include!({path:?}); }};\n}}\n"
-            ),
-        )?;
+    pub fn manifest(&mut self, edit: impl FnOnce(&mut Manifest) -> Result<()>) -> Result<()> {
+        let path = self.directory.join("Cargo.toml");
+        let mut manifest = toml::from_str(&fs::read_to_string(&path)?)?;
+        edit(&mut manifest)?;
+        fs::write(path, toml::to_string(&manifest)?)?;
         Ok(())
     }
 }

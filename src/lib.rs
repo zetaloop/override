@@ -8,8 +8,6 @@ mod source;
 mod symbol;
 
 #[cfg(feature = "build")]
-mod manifest;
-#[cfg(feature = "build")]
 mod package;
 #[cfg(feature = "build")]
 mod sources;
@@ -19,11 +17,11 @@ pub use cargo_config2::Config;
 #[cfg(feature = "build")]
 pub use cargo_metadata::{DependencyKind, Target, TargetKind};
 #[cfg(feature = "build")]
-pub use manifest::check_target;
-#[cfg(feature = "build")]
 pub use package::Package;
 #[cfg(feature = "build")]
-pub use sources::{Entry, Sources};
+pub use sources::Sources;
+#[cfg(feature = "build")]
+pub use toml::Table as Manifest;
 
 pub use ra_ap_syntax::Edition;
 pub use region::Boundary;
