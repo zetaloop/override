@@ -251,10 +251,47 @@ dependencies = [
  "cargo-config2",
  "cargo_metadata",
  "flate2",
- "ra_ap_syntax",
+ "override-syntax",
  "serde_json",
  "tar",
  "toml",
+]
+
+[[package]]
+name = "override-lexer"
+version = "0.4.0"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "override-parser"
+version = "0.4.0"
+dependencies = [
+ "drop_bomb",
+ "override-lexer",
+ "ra_ap_edition",
+ "rustc-literal-escaper",
+ "tracing",
+ "winnow 0.7.15",
+]
+
+[[package]]
+name = "override-syntax"
+version = "0.4.0"
+dependencies = [
+ "either",
+ "itertools",
+ "override-lexer",
+ "override-parser",
+ "ra_ap_stdx",
+ "rowan",
+ "rustc-hash 2.1.3",
+ "rustc-literal-escaper",
+ "smallvec",
+ "smol_str",
+ "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -282,35 +319,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ra-ap-rustc_lexer"
-version = "0.166.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "527c12b3731b7d0692498012810b85b2b8dfdb8b514321ed6afc434bd1c70191"
-dependencies = [
- "memchr",
- "unicode-ident",
- "unicode-properties",
-]
-
-[[package]]
 name = "ra_ap_edition"
 version = "0.0.360"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "408235fd4b7b1f6d9865b84b5ba78be7d21428448559ed2a6701c3529cc1943d"
-
-[[package]]
-name = "ra_ap_parser"
-version = "0.0.360"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20e36c55a9e53316f3f63fb9b0ffe34061ca6c491750f60f9d0aea12e977084a"
-dependencies = [
- "drop_bomb",
- "ra-ap-rustc_lexer",
- "ra_ap_edition",
- "rustc-literal-escaper",
- "tracing",
- "winnow 0.7.15",
-]
 
 [[package]]
 name = "ra_ap_stdx"
@@ -326,27 +338,6 @@ dependencies = [
  "miow",
  "tracing",
  "windows-sys",
-]
-
-[[package]]
-name = "ra_ap_syntax"
-version = "0.0.360"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5beb5708da710e050cf7bc886ba35c9e06e271d844d1aa4923c5ac5da665412d"
-dependencies = [
- "either",
- "itertools",
- "ra-ap-rustc_lexer",
- "ra_ap_parser",
- "ra_ap_stdx",
- "rowan",
- "rustc-hash 2.1.3",
- "rustc-literal-escaper",
- "smallvec",
- "smol_str",
- "tracing",
- "triomphe",
- "unicode-ident",
 ]
 
 [[package]]
@@ -580,12 +571,6 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[package]]
-name = "unicode-properties"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "windows-link"

@@ -1,0 +1,13 @@
+[package]
+name = "override-patches"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+override = { path = ".." }
+ra_ap_syntax = "=0.0.360"
+toml = { version = "1.1.8", features = ["preserve_order"] }
+unicode-ident = "1.0.24"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["emoji"] }
