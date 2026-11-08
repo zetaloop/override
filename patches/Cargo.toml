@@ -1,13 +1,26 @@
 [package]
 name = "override-patches"
+version = "0.0.0"
 edition = "2024"
 publish = false
 
 [workspace]
 
+[lib]
+name = "override"
+path = "../src/lib.rs"
+
+[features]
+default = ["build"]
+build = []
+
 [dependencies]
-override = { path = ".." }
+cargo-config2 = "0.1.45"
+cargo_metadata = "0.23.1"
+flate2 = "1.1.10"
 ra_ap_syntax = "=0.0.360"
+serde_json = "1.0.154"
+tar = { version = "0.4.46", default-features = false }
 toml = { version = "1.1.8", features = ["preserve_order"] }
 unicode-ident = "1.0.24"
 unicode-properties = { version = "0.1.4", default-features = false, features = ["emoji"] }
