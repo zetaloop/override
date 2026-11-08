@@ -3,6 +3,7 @@ name: Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,12 +19,27 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       - run: cargo +stable run --manifest-path patches/Cargo.toml
-      - run: cargo +stable publish --workspace --manifest-path patches/target/out/Cargo.toml
+      - name: Publish generated parser crates
+        run: |
+          for crate in override-lexer override-parser override-syntax; do
+            version=$(cargo +stable metadata --manifest-path "patches/target/out/$crate/Cargo.toml" --no-deps --format-version 1 | jq -r '.packages[0].version')
+            if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/$crate/$version"; then
+              echo "$crate $version already published"
+              continue
+            fi
+            cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml"
+          done
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: |
+      - name: Publish override
+        run: |
+          version=$(cargo +stable metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/override/$version"; then
+            echo "override $version already published"
+            exit 0
+          fi
           for _ in 1 2 3 4 5; do
-            cargo +stable publish && exit 0
+            cargo +stable publish --allow-dirty && exit 0
             sleep 15
           done
           exit 1
