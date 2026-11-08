@@ -1,6 +1,6 @@
 # Editing Rust
 
-`Source` holds parsed Rust source. A `Selector` describes an object, and `Source::select` resolves it to one `Selected` object. An editing operation consumes that selection; the next query observes the edited source.
+`Source` holds parsed Rust source. `Source::select` resolves a `Selector` to exactly one `Selected` object. An edit consumes the selection, and later queries see the edited source.
 
 ```rust
 use r#override::{Edition, Result, Source, item};
@@ -16,13 +16,13 @@ fn main() -> Result<()> {
 }
 ```
 
-`Source::edition()` returns the parsing edition. `Selected::text()` returns the selected text, and `Source` implements `Display` for writing the result.
+`Source::edition()` returns the edition used for parsing, and `Selected::text()` returns the selected text. `Source` implements `Display` for writing out the result.
 
-The following snippets use a `Source` named `source` and the `item`, `call`, `arm` and `root` constructors exported by `r#override`. Declaration names refer to the code being edited.
+The snippets below use a `Source` named `source` and the `item`, `call`, `arm` and `root` functions from `r#override`. Names like `State` and `run` refer to declarations in the code being edited.
 
 ## Selecting a target
 
-Queries follow declarations and structure:
+Queries follow declarations and code structure:
 
 ```rust
 item("Runtime::run")
@@ -30,7 +30,7 @@ item("Runtime::run")
     .has(arm("Command::Print"))
 ```
 
-Each step searches within the objects produced by the previous step. `item`, `call` and `arm` also have free-function forms that start a query; `root()` starts at the current selection scope.
+Each step searches within the results of the previous one. `item`, `call` and `arm` can also start a query as free functions, and `root()` starts from the current scope.
 
 | Selection | Meaning |
 | :--- | :--- |
@@ -46,7 +46,7 @@ Each step searches within the objects produced by the previous step. `item`, `ca
 | `for_loop()`, `while_loop()`, `loop_expr()` | A loop |
 | `if_expr()`, `match_expr()`, `closure()` | A conditional, match or closure |
 
-Parts of a selected object have their own queries:
+Parts of an object have their own steps:
 
 ```rust
 item("State").field("value")
@@ -56,19 +56,19 @@ item("dispatch").generic("T")
 item("dispatch").attribute("inline")
 ```
 
-`attribute` accepts an attribute path, such as `"inline"`, or complete attribute contents, such as `"cfg(feature = \"active\")"`. `body()` selects a function, closure, loop or match-arm body. `condition()` selects an `if` or `while` condition, or a `for` iterable.
+`attribute` takes an attribute path, such as `"inline"`, or the full attribute contents, such as `"cfg(feature = \"active\")"`. `body()` selects the body of a function, closure, loop or match arm. `condition()` selects an `if` or `while` condition, or a `for` iterable.
 
 ### Narrowing a query
 
-`has(query)` retains objects containing a match. `child(query)` follows the nearest structural child rather than every descendant:
+`has(query)` keeps objects that contain a match. `child(query)` looks only at the nearest structural level instead of all descendants:
 
 ```rust
 item("run").body().child(root().binding("message"))
 ```
 
-`and(query)` and `not(query)` test whether the same object matches another query. `or(query)` combines results and removes duplicates.
+`and(query)` and `not(query)` check whether the same object also matches another query. `or(query)` merges results without duplicates.
 
-Additional filters express known relationships:
+Other filters check known relationships:
 
 ```rust
 item("Buffer::write").implementing("Write")
@@ -76,13 +76,13 @@ item("State").field("value").of_type("u32")
 item("run").if_expr().references("self.ready")
 ```
 
-`of_type` compares declared types using the available declaration context. `references` looks for a named path or field expression in the selected object's syntax.
+`of_type` compares declared types using the available declarations. `references` checks whether the object mentions a path or field expression.
 
-A completed selection must identify one object. Missing and ambiguous results produce errors. An enclosing declaration, trait, type or structural relationship can provide the additional information needed to identify the intended object.
+The query passed to `select` must match exactly one object; no match or several matches is an error. An enclosing declaration, trait, type or structural step can narrow an ambiguous query.
 
 ### Macro inputs
 
-Queries traverse macro inputs that parse as Rust items, statements or comma-separated expressions:
+Queries also search macro inputs that parse as Rust items, statements or comma-separated expressions:
 
 ```rust
 source
@@ -94,26 +94,26 @@ source
     .redirect("patched::calculate")?;
 ```
 
-For `assert_eq!(calculate(x), expected())`, this changes the first call and writes it back through the surrounding token tree. Nested macros use the same mechanism.
+In `assert_eq!(calculate(x), expected())`, this changes the first call and writes it back into the macro's tokens. Nested macros work the same way.
 
-These are views of the input syntax. `stringify!(calculate(x), expected())` also contains a selectable call-shaped fragment, although the macro turns those tokens into a string. The patch chooses the interpretation appropriate to the macro being edited.
+Queries see only the tokens, not what the macro does with them. `stringify!(calculate(x), expected())` also contains a selectable call, although the macro turns it into a string. The patch decides which selections make sense for a given macro.
 
 ## Associating declarations
 
-Parameter and field names can come from the available declarations, module paths, explicit imports, aliases, enclosing implementations and local bindings.
+Parameter and field names are matched using the visible declarations, module paths, imports, aliases, enclosing implementations and local bindings.
 
-For source spread across files, name the current module and provide the other source:
+For source spread across files, set the current module and add the other files as context:
 
 ```rust
 source.set_module("runtime::worker")?;
 source.add_source("runtime::shared", &shared);
 ```
 
-`add_source` supplies declaration context. Edits apply to `source`; the supplied `shared` source remains its own object.
+`add_source` only provides declarations for lookup; edits still apply to `source` alone.
 
 ### Named call arguments
 
-`argument("name")` follows the call's declaration to locate the corresponding argument:
+`argument("name")` uses the called function's declaration to find the argument for that parameter:
 
 ```rust
 source
@@ -121,7 +121,7 @@ source
     .delegate("decorate", &["context"])?;
 ```
 
-An interface declaration can supply parameter names for an external call:
+For a function outside the available source, supply its declaration directly:
 
 ```rust
 use r#override::Declaration;
@@ -142,32 +142,32 @@ source
     .delegate("decorate", &["context"])?;
 ```
 
-`Source::declaration(query)` and `Selected::declaration()` obtain declaration objects from parsed source. `declared_by` associates a call or symbol query with such an object.
+`Source::declaration(query)` and `Selected::declaration()` take a declaration from parsed source instead. `declared_by` attaches such a declaration to a call or symbol query.
 
-`argument("self")` identifies a method receiver. Ordinary named arguments can be edited with `set_value` or `remove`.
+`argument("self")` selects a method receiver. Other named arguments can be changed with `set_value` or removed with `remove`.
 
 ### Interface and layout descriptions
 
-`describe` accepts Rust interface declarations:
+`describe` adds declarations that the source does not contain:
 
 ```rust
 source.describe("type Outcome<T> = std::result::Result<T, Error>;")?;
 ```
 
-It also accepts named record and tuple-struct binding patterns. These express layout knowledge for fields that have positional Rust syntax:
+It also accepts record and tuple-struct patterns with named bindings, which give names to positional fields:
 
 ```rust
 source.describe("Pair(left, right)")?;
 source.select(item("Pair").field("right"))?.set_type("u16")?;
 ```
 
-For an input such as `struct Pair(u8, u8);`, the pattern supplies the field names used by the query. Destructuring patterns and getter field accesses in the available source can also supply these relationships.
+For `struct Pair(u8, u8);`, the pattern supplies the field names used by the query. Destructuring patterns and getters in the available source can supply them as well.
 
-Descriptions express the patch's interface knowledge. Rust compilation checks the resulting types and borrows.
+Descriptions are taken as written; the compiler checks the resulting types and borrows.
 
 ## Editing declarations and values
 
-Editing methods accept the corresponding Rust fragment:
+Each editing method takes the Rust fragment it inserts or replaces:
 
 ```rust
 source.select(item("State"))?.add_field("pub(crate) shared: Shared")?;
@@ -193,9 +193,9 @@ source.select(item("run"))?.add_attribute("#[inline]")?;
 | `set_signature("pub fn run(input: &Input)")` | Replaces a function header, retaining its body and attributes |
 | `remove()` | Removes a declaration, member, attribute, import or named argument |
 
-`rename` operates on the declaration or alias itself. [Symbol redirection](#redirecting-symbols-and-calls) follows references associated with a declaration.
+`rename` changes only the declaration or alias. [Symbol redirection](#redirecting-symbols-and-calls) updates the references to it.
 
-Named value slots and conditions use expression fragments:
+Values and conditions take expressions:
 
 ```rust
 source
@@ -205,9 +205,9 @@ source.select(item("LIMIT"))?.set_value("64")?;
 source.select(item("run").while_loop())?.set_condition("self.ready()")?;
 ```
 
-`set_value` accepts record-field initializers, constants, statics, enum discriminants and named call arguments. `set_condition` updates an `if` or `while` condition, or a `for` iterable.
+`set_value` works on record-field initializers, constants, statics, enum discriminants and named call arguments. `set_condition` replaces the condition of an `if` or `while`, or the iterable of a `for`.
 
-For destructuring that should accept additional record fields:
+To let a destructuring pattern accept other fields, add `..`:
 
 ```rust
 source.select(item("run").pattern("State"))?.add_rest()?;
@@ -215,7 +215,7 @@ source.select(item("run").pattern("State"))?.add_rest()?;
 
 ### Adding members and choosing their position
 
-List additions follow the selected list's layout. Receivers precede ordinary parameters, lifetime parameters precede type and const parameters, and fields precede a trailing `..`. A specific insertion point is expressed with `at`:
+New items go where Rust's ordering expects them, such as after a receiver, after lifetime parameters or before a trailing `..`. `at` chooses a specific position:
 
 ```rust
 source
@@ -224,9 +224,9 @@ source
     .add_arm("Command::Repeat { message, count } => repeat(message, count)")?;
 ```
 
-The same positioning option applies to attributes, fields, variants, parameters, generics, call arguments, imports and mounted modules. Its boundary query is resolved within the selected owner.
+`at` also applies to attributes, fields, variants, parameters, generics, call arguments, imports and mounted modules. Its query searches within the selected object.
 
-Match-arm insertion places a specific arm before a trailing catch-all by default. `at` expresses an explicit position when the order matters.
+A new match arm goes before a trailing catch-all by default; `at` places it elsewhere.
 
 ```rust
 source.select(item("run").call("dispatch"))?.add_argument("context")?;
@@ -234,11 +234,11 @@ source.select(root())?.add_use("use crate::support::Context;")?;
 source.select(root())?.mount_module("mod support", &support_path)?;
 ```
 
-`mount_module` creates a module declaration with a `#[path = ...]` attribute. A complete declaration such as `"pub mod support"` controls visibility. Imports join the leading declaration group; items inserted into a block precede its tail expression.
+`mount_module` adds a module declaration with a `#[path = ...]` attribute; `"pub mod support"` makes it public. New imports join the existing ones at the top, and items added to a block go before its final expression.
 
 ## Redirecting symbols and calls
 
-`redirect` changes the target of a selected call, macro or import:
+`redirect` points a call, macro or import at a new target:
 
 ```rust
 source
@@ -246,17 +246,17 @@ source
     .redirect("crate::support::calculate")?;
 ```
 
-Call redirection carries existing generic arguments unless the supplied target provides its own. A method can be redirected to another method name; [delegation](#delegating-through-a-helper) passes its receiver to a qualified helper function.
+Generic arguments on the call are kept unless the new target supplies its own. A method call can be redirected to another method name; to pass the receiver to a free function, use [delegation](#delegating-through-a-helper).
 
-To follow a declaration's references throughout a scope, finish the query with `symbol`:
+To update every reference to a declaration in a scope, end the query with `symbol`:
 
 ```rust
 source.select(root().symbol("State"))?.redirect("crate::shared::State")?;
 ```
 
-The symbol is resolved using the scope's declarations and imports. Qualified paths and associated references are then rewritten for that declaration. `declared_by` can identify the declaration when several namespaces or external interfaces are involved.
+The name is resolved through the scope's declarations and imports, and every path and associated reference to that declaration is rewritten. When the name is ambiguous, `declared_by` identifies the declaration.
 
-A symbol selection represents references and supports redirection. A declaration selection represents the named object and supports edits such as `rename`, `set_visibility` and `remove`.
+A symbol selection covers the references and supports `redirect`. A declaration selection covers the declaration itself and supports edits such as `rename`, `set_visibility` and `remove`.
 
 ## Reusing upstream logic
 
@@ -270,21 +270,21 @@ source
     .delegate("crate::support::block_on", &["context"])?;
 ```
 
-The helper receives the supplied context first, then the original method receiver, if present, and the original arguments. Explicit call generics travel to the helper.
+The helper receives the context arguments first, then the original receiver if any, then the original arguments. Explicit generic arguments are passed to the helper.
 
-For a closure, the helper receives the original closure after the context. For a whole function or region, delegation wraps the selected code in a closure. Async code uses an async block and awaits the helper.
+For a closure, the helper receives the closure after the context. A delegated function or region is first wrapped in a closure; async code is wrapped in an async block instead, and the helper call is awaited.
 
-This lets the helper decide how to invoke the upstream operation:
+The helper then decides how to run the original code:
 
 ```rust
 source.select(item("run"))?.delegate("instrument", &["context"])?;
 ```
 
-Region delegation requires exits to fit the generated closure or async block. Function extraction provides the explicit control-flow conversion described below.
+A delegated region may only exit in ways that work inside a closure or async block. For returns or breaks out of the surrounding code, use extraction, described below.
 
 ### Selecting a region
 
-Functions, loops, match arms and closure bodies provide structural extraction targets. A region joins two named boundaries when the desired operation spans several statements:
+Whole functions, loops, match arms and closure bodies can be extracted directly. For a run of statements, mark its start and end as a region:
 
 ```rust
 let region = item("run").body().region(
@@ -293,11 +293,11 @@ let region = item("run").body().region(
 );
 ```
 
-`before()` and `after()` refer to the selected object, including a statement's semicolon. For a binding they refer to its enclosing declaration. `start()` and `end()` refer to the selected object's body or contents.
+`before()` and `after()` refer to the edges of the selected object, including a statement's semicolon; for a binding, the edges of its `let` statement. `start()` and `end()` refer to the edges of the object's body or contents.
 
-The two boundary queries run within the current scope and must each identify one object. Their interval must contain complete syntax elements. The selected contents must form a Rust body for extraction or delegation.
+Both boundary queries search the current scope and must each match one object. The region must cover complete syntax and form a valid Rust body for extraction or delegation.
 
-Regions depend on source order: upstream code added between the anchors becomes part of the region. A whole function, loop or branch provides an alternative when it already expresses the operation being reused.
+A region depends on code order: code added upstream between its boundaries becomes part of it. Selecting a whole function, loop or branch avoids this when one already covers the reused code.
 
 ### Extracting a function
 
@@ -310,15 +310,15 @@ source
     )?;
 ```
 
-The supplied signature defines the helper, and `arguments` supplies its call expressions. A `self` receiver is carried by the generated method call; the argument list corresponds to the remaining parameters.
+The signature defines the new helper, and `arguments` gives the expressions passed at the call site. A `self` receiver makes it a method call, so `arguments` covers only the remaining parameters.
 
-The helper is inserted beside the enclosing function. Associated helpers use the enclosing implementation or trait context. An async signature produces an awaited call.
+The helper goes next to the original function, in the same `impl` or trait if there is one. An async signature makes the call awaited.
 
-Extraction creates a function scope. The signature, arguments and output bindings express the patch's choices about moves, borrows and local destruction.
+The extracted code runs in its own function, so moves, borrows and drop order follow from the chosen signature, arguments and outputs.
 
 ### Carrying control flow
 
-Options precede `extract`:
+Options go before `extract`:
 
 ```rust
 source
@@ -331,17 +331,17 @@ source
     )?;
 ```
 
-`control_flow()` carries `return`, `break` and `continue` whose destinations are outside the selection. The call site performs the original action, including its label and value. Exits belonging to loops or closures inside the selection travel with their owner.
+`control_flow()` handles `return`, `break` and `continue` that leave the selection: the helper reports the exit, and the call site performs it with the original label and value. Exits that stay within a loop or closure inside the selection are unchanged.
 
-One distinct external exit uses its payload directly in `core::ops::ControlFlow`. Several exit kinds or destinations use a generated enum named after the helper, such as `ParseItemExit`, with the helper's visibility.
+A single kind of exit uses `core::ops::ControlFlow` with its value directly. Several kinds use a generated enum named after the helper, such as `ParseItemExit`, with the helper's visibility.
 
-`propagate()` carries `?` through the enclosing `Result`, `Option` or `ControlFlow` container and applies `?` at the generated call. Available aliases and interface declarations participate in resolving that container.
+`propagate()` keeps `?` working: the helper returns the enclosing `Result`, `Option` or `ControlFlow` type, and the call site applies `?`. Aliases and supplied declarations help determine that type.
 
-The signature describes normal completion. For a normal result `Output`, combined options in a `Result` context produce a shape such as `Result<ControlFlow<Exit, Output>, Error>`. Exit payload types come from the enclosing return declaration, a loop destination's type or the value's declaration.
+The signature's return type is the helper's normal result. With both options in a function returning `Result`, a normal result `Output` becomes something like `Result<ControlFlow<Exit, Output>, Error>`. Exit value types come from the function's return type, the loop's type or the value's declaration.
 
 ### Returning local bindings
 
-`outputs` names bindings created within the selected code and describes how to receive them:
+`outputs` lists variables declared in the extracted code that the rest of the function still uses:
 
 ```rust
 fn prepare(raw: &str) -> usize {
@@ -354,7 +354,7 @@ fn prepare(raw: &str) -> usize {
 }
 ```
 
-Extract the declarations and increment before `report`:
+Extract the declarations and the first increment, everything before `report`:
 
 ```rust
 source
@@ -369,32 +369,32 @@ source
     )?;
 ```
 
-For a statement region, the call site receives these values as:
+The call site receives them as:
 
 ```rust
 let (name, mut count) = parse_name(raw);
 ```
 
-Each entry is an identifier with an optional `mut`. The name is associated with its visible declaration at the end of the region; that declaration must belong to the selected code. The receiver's mutability is explicit because mutation may occur on different sides of the extraction.
+Each entry is a variable name with an optional `mut`. It refers to the variable visible at the end of the region, which must be declared within the selection. `mut` is explicit because the variable may change in the helper, after the call, or both.
 
-The helper's declarations can be edited through the same binding selectors. For example, extracting only `let mut count = 1;` into `seed` leaves mutation at the call site. The helper's binding then becomes immutable:
+The helper's own variables can be edited with the same selectors. For example, extracting only `let mut count = 1;` into `seed` leaves all changes after the call, so the helper's variable no longer needs `mut`:
 
 ```rust
 source.select(item("seed").binding("count"))?.set_binding("count")?;
 ```
 
-A single output uses its own return type. Multiple outputs use a tuple in the listed order. When the selected code also yields an ordinary expression result, that result occupies the first tuple element, followed by the outputs. The original expression receives that leading value.
+One output is returned directly; several are returned as a tuple in the listed order. If the selected code also produces an expression value, that value comes first and replaces the original expression.
 
-The supplied signature describes this complete normal result. `control_flow()` and `propagate()` wrap it as above. Newly declared outputs are returned on normal completion, while earlier exits follow their corresponding control-flow paths.
+The signature's return type covers this whole result, wrapped by `control_flow()` and `propagate()` as above. Outputs are returned only on normal completion; early exits follow their control-flow path.
 
-Inputs already declared outside the selection use the supplied parameter and argument interface. Selecting such an input as a new output produces an error.
+Variables declared before the selection come in through parameters and arguments; listing one in `outputs` is an error.
 
 ## Runnable example
 
-[examples/edit.rs](../examples/edit.rs) extends a command dispatcher with a repeat operation. It extracts the existing print-arm implementation, adds an enum variant and routes the added match arm through that helper.
+[examples/edit.rs](../examples/edit.rs) adds a repeat command to a command dispatcher. It extracts the print arm's code into a helper, adds an enum variant and makes the new arm call the helper.
 
 ```sh
 cargo run --example edit
 ```
 
-The example writes the resulting Rust program to stdout. Its `main` accepts a message and repeat count.
+The example prints the edited program. Its `main` takes a message and a repeat count.
