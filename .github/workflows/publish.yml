@@ -23,21 +23,25 @@ jobs:
         run: |
           for crate in override-lexer override-parser override-syntax; do
             version=$(cargo +stable metadata --manifest-path "patches/target/out/$crate/Cargo.toml" --no-deps --format-version 1 | jq -r '.packages[0].version')
-            if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/$crate/$version"; then
-              echo "$crate $version already published"
-              continue
-            fi
-            cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml"
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/$crate/$version")
+            case "$code" in
+              200) echo "$crate $version already published" ;;
+              404) cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml" ;;
+              *) echo "crates.io answered $code for $crate $version"; exit 1 ;;
+            esac
           done
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          USER_AGENT: override-release (https://github.com/${{ github.repository }})
       - name: Publish override
         run: |
           version=$(cargo +stable metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/override/$version"; then
-            echo "override $version already published"
-            exit 0
-          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/override/$version")
+          case "$code" in
+            200) echo "override $version already published"; exit 0 ;;
+            404) ;;
+            *) echo "crates.io answered $code for override $version"; exit 1 ;;
+          esac
           for _ in 1 2 3 4 5; do
             cargo +stable publish --allow-dirty && exit 0
             sleep 15
@@ -45,3 +49,4 @@ jobs:
           exit 1
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          USER_AGENT: override-release (https://github.com/${{ github.repository }})
