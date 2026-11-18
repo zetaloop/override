@@ -7,15 +7,23 @@ description = "Symbol-based Rust source editing and dependency patching"
 repository = "https://github.com/zetaloop/override"
 license = "MIT"
 
+[[bin]]
+name = "override"
+path = "src/cli/main.rs"
+required-features = ["build"]
+
 [dependencies]
 cargo-config2 = { version = "0.1.45", optional = true }
 cargo_metadata = { version = "0.23.1", optional = true }
 flate2 = { version = "1.1.10", optional = true }
 ra_ap_syntax = { version = "0.4.0", package = "override-syntax" }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 tar = { version = "0.4.46", optional = true, default-features = false }
+tempfile = { version = "3.27.0", default-features = false, optional = true }
 toml = { version = "1.1.8", optional = true }
+toml_edit = { version = "0.25.19", optional = true }
 
 [features]
 default = ["build"]
-build = ["dep:cargo-config2", "dep:cargo_metadata", "dep:flate2", "dep:serde_json", "dep:tar", "dep:toml"]
+build = ["dep:cargo-config2", "dep:cargo_metadata", "dep:flate2", "dep:serde", "dep:serde_json", "dep:tar", "dep:tempfile", "dep:toml", "dep:toml_edit"]

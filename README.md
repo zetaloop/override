@@ -1,10 +1,6 @@
 # override
 
-Symbol-based Rust source editing and dependency patching. A patch workspace edits upstream packages and writes them as crates for publishing.
-
-Queries locate code by its declarations, calls and their relationships, and edits use Rust fragments such as fields, types and function signatures. Because patches follow structure instead of line positions, they keep working as upstream source changes.
-
-The crate is imported as `r#override`. Without default features it provides only the editor; the default `build` feature adds Cargo integration.
+override lets you patch a Rust dependency by naming the code you want to change. This patch changes the type of the `value` field in `State`:
 
 ```rust
 use r#override::{Edition, Result, Source, item};
@@ -17,8 +13,16 @@ fn main() -> Result<()> {
 }
 ```
 
+The CLI can also build a project against a compatible replacement library. To try one from a local checkout:
+
+```sh
+cargo install override
+override with --path ../my-runtime -- build
+```
+
 ## Documentation
 
 - [Editing Rust](docs/editing.md): selecting targets, supplying declarations, changing source and reusing upstream logic.
 - [Patch workspaces](docs/patches.md): preparing dependency sources and publishing the edited packages.
+- [Replacing a dependency](docs/replacements.md): using a replacement library or providing one for other projects.
 - [Editing example](examples/edit.rs): extending a command dispatcher by reusing its output implementation.
