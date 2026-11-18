@@ -1,31 +1,13 @@
 # Editing Rust
 
-`Source` holds parsed Rust source. `Source::select` resolves a `Selector` to exactly one `Selected` object. An edit consumes the selection, and later queries see the edited source.
-
-```rust
-use r#override::{Edition, Result, Source, item};
-
-fn main() -> Result<()> {
-    let mut source = Source::parse(
-        "struct State { value: u32 }",
-        Edition::Edition2024,
-    )?;
-    source.select(item("State").field("value"))?.set_type("u64")?;
-    println!("{source}");
-    Ok(())
-}
-```
-
-`Source::edition()` returns the edition used for parsing, and `Selected::text()` returns the selected text. `Source` implements `Display` for writing out the result.
-
-The snippets below use a `Source` named `source` and the `item`, `call`, `arm` and `root` functions from `r#override`. Names like `State` and `run` refer to declarations in the code being edited.
+Parse a file with `Source::parse` and its Rust edition, then select the code to edit. Each query sees the result of the previous edit. `source.to_string()` gives you the edited file. If you use only the editor, you can disable the crate's default features.
 
 ## Selecting a target
 
-Queries follow declarations and code structure:
+In the [command dispatcher example](../examples/edit.rs), this query finds the `match` inside `dispatch` that handles `Command::Print`:
 
 ```rust
-item("Runtime::run")
+item("upstream::dispatch")
     .match_expr()
     .has(arm("Command::Print"))
 ```
@@ -66,9 +48,9 @@ item("dispatch").attribute("inline")
 item("run").body().child(root().binding("message"))
 ```
 
-`and(query)` and `not(query)` check whether the same object also matches another query. `or(query)` merges results without duplicates.
+`and(query)` keeps objects that also match the second query; `not(query)` excludes them. `or(query)` merges results without duplicates.
 
-Other filters check known relationships:
+You can also narrow a query by trait, declared type or reference:
 
 ```rust
 item("Buffer::write").implementing("Write")
@@ -78,7 +60,7 @@ item("run").if_expr().references("self.ready")
 
 `of_type` compares declared types using the available declarations. `references` checks whether the object mentions a path or field expression.
 
-The query passed to `select` must match exactly one object; no match or several matches is an error. An enclosing declaration, trait, type or structural step can narrow an ambiguous query.
+`select` reports an error unless exactly one object matches. Add an enclosing declaration or a filter to narrow an ambiguous query. `Selected::text()` shows what matched.
 
 ### Macro inputs
 
@@ -94,9 +76,7 @@ source
     .redirect("patched::calculate")?;
 ```
 
-In `assert_eq!(calculate(x), expected())`, this changes the first call and writes it back into the macro's tokens. Nested macros work the same way.
-
-Queries see only the tokens, not what the macro does with them. `stringify!(calculate(x), expected())` also contains a selectable call, although the macro turns it into a string. The patch decides which selections make sense for a given macro.
+This changes `calculate(x)` inside `assert_eq!(calculate(x), expected())`. Queries see the macro's input: the same call can be selected inside `stringify!`, even though that macro produces a string.
 
 ## Associating declarations
 
@@ -163,8 +143,6 @@ source.select(item("Pair").field("right"))?.set_type("u16")?;
 
 For `struct Pair(u8, u8);`, the pattern supplies the field names used by the query. Destructuring patterns and getters in the available source can supply them as well.
 
-Descriptions are taken as written; the compiler checks the resulting types and borrows.
-
 ## Editing declarations and values
 
 Each editing method takes the Rust fragment it inserts or replaces:
@@ -226,7 +204,7 @@ source
 
 `at` also applies to attributes, fields, variants, parameters, generics, call arguments, imports and mounted modules. Its query searches within the selected object.
 
-A new match arm goes before a trailing catch-all by default; `at` places it elsewhere.
+Without `at`, a new match arm goes before a trailing catch-all.
 
 ```rust
 source.select(item("run").call("dispatch"))?.add_argument("context")?;
@@ -274,13 +252,7 @@ The helper receives the context arguments first, then the original receiver if a
 
 For a closure, the helper receives the closure after the context. A delegated function or region is first wrapped in a closure; async code is wrapped in an async block instead, and the helper call is awaited.
 
-The helper then decides how to run the original code:
-
-```rust
-source.select(item("run"))?.delegate("instrument", &["context"])?;
-```
-
-A delegated region may only exit in ways that work inside a closure or async block. For returns or breaks out of the surrounding code, use extraction, described below.
+For a region that returns from the surrounding function or breaks out of an enclosing loop, use [extraction with `control_flow()`](#carrying-control-flow).
 
 ### Selecting a region
 
@@ -391,10 +363,13 @@ Variables declared before the selection come in through parameters and arguments
 
 ## Runnable example
 
-[examples/edit.rs](../examples/edit.rs) adds a repeat command to a command dispatcher. It extracts the print arm's code into a helper, adds an enum variant and makes the new arm call the helper.
+[examples/edit.rs](../examples/edit.rs) adds a `Repeat` command to a dispatcher. It extracts `Print`'s write and flush operations into `write_line`, so both commands use the same output logic. Running the example prints the edited Rust source.
+
+To compile that source and run the new command:
 
 ```sh
-cargo run --example edit
+cargo run --example edit | rustc --edition 2024 --crate-name dispatcher -
+./dispatcher Hello 2
 ```
 
-The example prints the edited program. Its `main` takes a message and a repeat count.
+The dispatcher prints `Hello` twice, each time on its own line.

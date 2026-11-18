@@ -1,29 +1,7 @@
 use r#override::{Edition, Result, Source, arm, item};
 
 fn main() -> Result<()> {
-    let mut source = Source::parse(
-        r#"pub mod upstream {
-    use std::io::{self, Write};
-
-    pub enum Command {
-        Print(String),
-        Quit,
-    }
-
-    pub fn dispatch(command: Command, output: &mut impl Write) -> Result<bool, io::Error> {
-        match command {
-            Command::Print(message) => {
-                writeln!(output, "{message}")?;
-                output.flush()?;
-            }
-            Command::Quit => return Ok(false),
-        }
-        Ok(true)
-    }
-}
-"#,
-        Edition::Edition2024,
-    )?;
+    let mut source = Source::parse(UPSTREAM, Edition::Edition2024)?;
 
     source
         .select(item("upstream::dispatch").arm("Command::Print"))?
@@ -44,7 +22,32 @@ fn main() -> Result<()> {
         .at(arm("Command::Quit").before())
         .add_arm("Command::Repeat { message, count } => crate::repeat(&message, count, output)?")?;
 
-    let application = r#"
+    print!("{source}{APPLICATION}");
+    Ok(())
+}
+
+const UPSTREAM: &str = r#"pub mod upstream {
+    use std::io::{self, Write};
+
+    pub enum Command {
+        Print(String),
+        Quit,
+    }
+
+    pub fn dispatch(command: Command, output: &mut impl Write) -> Result<bool, io::Error> {
+        match command {
+            Command::Print(message) => {
+                writeln!(output, "{message}")?;
+                output.flush()?;
+            }
+            Command::Quit => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+"#;
+
+const APPLICATION: &str = r#"
 fn repeat(message: &str, count: usize, output: &mut impl std::io::Write) -> std::io::Result<()> {
     for _ in 0..count {
         upstream::write_line(message, output)?;
@@ -61,6 +64,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 "#;
-    print!("{source}{application}");
-    Ok(())
-}

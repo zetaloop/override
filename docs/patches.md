@@ -1,19 +1,10 @@
 # Patch workspaces
 
-A patch workspace edits upstream packages and writes them out as complete crates for publishing. The project then depends on the published crates like any other dependency.
-
-`Package`, `Sources` and `Manifest` come from the default `build` feature.
+A patch workspace lets you keep the changes to a dependency in a small Rust program. Run it when you want to publish an edited version. Projects that use the result depend on the published crate as usual.
 
 ## Declare the upstream packages
 
-The workspace sits in a directory of the repository, such as `patches/`, excluded from the root workspace:
-
-```toml
-[workspace]
-exclude = ["patches"]
-```
-
-Its manifest lists the upstream packages as normal dependencies:
+For example, suppose your project uses `either` and you want a compiler warning when a caller discards an `Either` value. Give the patch program its own workspace and select the upstream version in `patches/Cargo.toml`:
 
 ```toml
 [package]
@@ -21,71 +12,59 @@ name = "patches"
 edition = "2024"
 publish = false
 
+[workspace]
+exclude = ["target/out"]
+
 [dependencies]
 override = "0.4"
-upstream = { package = "ra_ap_ide_assists", version = "=0.0.352" }
+either = "=1.19.0"
 ```
 
 ## Prepare, edit and write
 
-Its program copies each upstream package into a directory under `target/` and edits it there:
+In `patches/src/main.rs`, add `#[must_use]` to the enum and name the resulting package `checked-either`:
 
 ```rust
 use std::path::Path;
-use r#override::{Package, Result};
+use r#override::{Package, Result, item};
 
 fn main() -> Result<()> {
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/out");
-    let upstream = Package::load(env!("CARGO_MANIFEST_PATH"))?.dependency("upstream")?;
-    let mut sources = upstream.prepare(out.join("assists"))?;
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/out/checked-either");
+    let upstream = Package::load(env!("CARGO_MANIFEST_PATH"))?.dependency("either")?;
+    let mut sources = upstream.prepare(out)?;
+    sources.edit("src/lib.rs", |source| {
+        source.select(item("Either"))?.add_attribute("#[must_use]")
+    })?;
     sources.manifest(|manifest| {
-        manifest["package"]["name"] = "project-assists".into();
-        manifest["package"]["version"] = "0.1.0".into();
+        let package = manifest["package"].as_table_mut().unwrap();
+        package.insert("name".into(), "checked-either".into());
+        package.insert("version".into(), "0.1.0".into());
+        let generated = vec![".override-source", "Cargo.toml.orig", ".cargo_vcs_info.json"];
+        package.insert("exclude".into(), generated.into());
         Ok(())
     })?;
     Ok(())
 }
 ```
 
-[Editing Rust](editing.md) describes the edits that go between `prepare` and writing the manifest.
+`prepare` starts from the published archive for a registry dependency, the listed files for a vendored dependency, or the files Cargo would package for a Git or path dependency. Choose an empty output directory: each subsequent run recreates that copy from the upstream source.
 
-### Source contents
+## Trying the edited crate
 
-`prepare` takes the files from wherever Cargo got the package:
+From the project root, run `cargo run --manifest-path patches/Cargo.toml`. Point your application's `either` dependency at the result:
 
-| Source | Prepared input |
-| :--- | :--- |
-| Registry or registry mirror | The corresponding published `.crate` archive |
-| Local registry | The `.crate` archive in the configured local registry |
-| Vendor directory | Files listed in `.cargo-checksum.json` |
-| Git or path dependency | Actual file paths from Cargo's package file listing |
-
-Registry packages give exactly the published contents. Git and path packages give the files Cargo would package under its include and exclude rules, including the original manifest and resources outside the package directory. For vendored packages, a listed file that is missing is an error.
-
-Listing Git and path files uses Cargo's structured file list. That option is unstable, so override sets `RUSTC_BOOTSTRAP=1` to use it with stable Cargo.
-
-The output directory must be empty or come from an earlier `prepare` call. Each call rebuilds it from the upstream files, so edits always start from the original source.
-
-Preparing into two directories gives two copies that can be edited differently:
-
-```rust
-let host = upstream.prepare(out.join("host"))?;
-let guest = upstream.prepare(out.join("guest"))?;
+```toml
+[dependencies]
+either = { package = "checked-either", path = "patches/target/out/checked-either" }
 ```
 
-### Working with files
+The application can still import `either::Either`. If a function returns `Either` and its caller discards the result, `cargo check` now reports an unused value.
 
-`Sources::directory()` returns the prepared directory, and `package()` returns the package it came from. File paths are relative to that directory:
+To publish, run `cargo publish --manifest-path patches/target/out/checked-either/Cargo.toml` and use `version = "0.1.0"` in place of `path` in the application. The example carries the upstream license files into the new package. It excludes the working copy's marker and the two files Cargo generates again during packaging.
 
-```rust
-sources.edit("src/lib.rs", |source| {
-    source.select(r#override::item("SCALE"))?.set_value("3")
-})?;
-```
+## Editing across files
 
-Queries see the declarations of that upstream version.
-
-When a file refers to declarations in another file, read that file and add it as context:
+Paths passed to `edit` and `read` are relative to the prepared directory. When an edit needs a declaration in another file, read it and add it as context:
 
 ```rust
 let declarations = sources.read("src/shared.rs")?;
@@ -96,54 +75,27 @@ sources.edit("src/worker.rs", |source| {
 })?;
 ```
 
-`read` parses a file without changing it, and `edit` saves the file only if the closure succeeds. `path` gives the full path for other resources:
+`edit` saves the file when the closure succeeds. For other resources, `sources.path("config.txt")?` gives the full path. Source files use the package's Rust edition unless you select a target with `sources.target(target)?`. See [Editing Rust](editing.md) for more ways to select and change code.
 
-```rust
-let config = sources.path("config.txt")?;
-```
+## Publishing related crates
 
-Files are parsed with the package's edition; `sources.target(target)?` switches to a particular target's edition.
-
-### Editing the manifest
-
-`Sources::manifest` edits the prepared `Cargo.toml`. `Manifest` is a re-export of `toml::Table`.
-
-When one generated crate depends on another, the dependency keeps its name and points to the new package:
+When another generated crate depends on `either`, change its manifest to use `checked-either`. Keeping the dependency key lets its source keep using `either::`:
 
 ```rust
 sources.manifest(|manifest| {
-    let dependency = manifest["dependencies"]["ide-db"].as_table_mut().unwrap();
-    dependency.insert("package".into(), "project-ide-db".into());
+    let dependency = manifest["dependencies"]["either"].as_table_mut().unwrap();
+    dependency.insert("package".into(), "checked-either".into());
     dependency.insert("version".into(), "=0.1.0".into());
-    dependency.insert("path".into(), "../project-ide-db".into());
+    dependency.insert("path".into(), "../checked-either".into());
     Ok(())
 })?;
 ```
 
-Registry archives also contain `Cargo.toml.orig` and `.cargo_vcs_info.json`, which `cargo package` creates again, so remove them before publishing. The `.override-source` marker belongs in the package's `exclude` list.
-
-## Selecting packages and targets
-
-`Package::load(manifest)` reads Cargo metadata for a manifest with all features enabled. `Package::current()` uses the `CARGO_MANIFEST_PATH` that Cargo sets for running programs and build scripts.
-
-`Package::data()` returns Cargo's information about the package, and `directory()` and `edition()` return its source directory and Rust edition.
-
-```rust
-let upstream = patches.dependency("upstream")?;
-let library = upstream.library()?;
-let script = upstream.build_script()?;
-let binary = upstream.target(r#override::TargetKind::Bin, "tool")?;
-```
-
-`library()` requires exactly one library target; `target(kind, name)` selects other targets by name.
-
-A dependency name may be declared several times for different platforms, each selecting a different package. In that case, pick the declaration from `patches.data().dependencies` and pass it to `patches.resolve(declaration)?`. Each declaration records its kind, platform condition, version and origin.
+List the generated crates in a workspace manifest under `target/out`, then run `cargo publish --workspace` from that directory. The [parser patch program](https://github.com/zetaloop/override/blob/main/patches/src/main.rs) shows a complete example.
 
 ## Using an existing metadata graph
 
-`Package::from_metadata(metadata, &id)` builds a `Package` from existing Cargo metadata. Metadata does not record source replacement settings, though.
-
-Preparing registry packages needs the same configuration Cargo used:
+`Package::load` selects a package by its manifest. If you already have a Cargo metadata graph, select it by ID instead. To prepare a registry archive, supply the configuration that tells Cargo where the archive came from:
 
 ```rust
 use r#override::{Config, Package};
@@ -153,34 +105,4 @@ let package = Package::from_metadata(metadata, &id)?.config(config);
 let sources = package.prepare(destination)?;
 ```
 
-`Config` is re-exported from `cargo-config2`. Packages reached through `dependency` or `resolve` share it.
-
-If the metadata came from a command with `--config` overrides, the configuration needs the same values. For example, when the command set `source.local.local-registry` to a directory:
-
-```rust
-let mut config = Config::load_with_cwd(project)?;
-config
-    .source
-    .entry("local".into())
-    .or_default()
-    .local_registry = Some(registry_directory);
-```
-
-Without a configuration, the package still supports queries; only `prepare` needs it.
-
-## Publishing
-
-For publishing, the output directory gets a workspace manifest listing the generated crates. Crates that depend on each other use both `path` and `version`, so Cargo publishes them in dependency order:
-
-```sh
-cd patches
-cargo run
-cd target/out
-cargo publish --workspace
-```
-
-During development, the project can build against a generated crate before it is published:
-
-```sh
-cargo build --config 'patch.crates-io.project-assists.path="patches/target/out/assists"'
-```
+If the original command used `--config` to select a registry mirror, apply those settings to `config` as well. Packages selected through `dependency` share that configuration. When the same dependency name selects different packages on different platforms, pass the relevant declaration from `package.data().dependencies` to `package.resolve(declaration)?`.
