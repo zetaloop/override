@@ -350,45 +350,55 @@ impl Location {
     }
 
     fn visit(&self, nodes: &mut Vec<Self>) {
-        let edition = self.edition;
         for node in self.node.descendants() {
             nodes.push(self.at(node.clone()));
-            let Some(tree) = ast::MacroCall::cast(node).and_then(|call| call.token_tree()) else {
-                continue;
-            };
-            let text = tree.to_string();
-            let Some(body) = text.get(1..text.len().saturating_sub(1)) else {
-                continue;
-            };
-            let parsed = fragment::file(body, edition)
-                .map(|root| (root, false))
-                .or_else(|_| {
-                    fragment::expression(&format!("{{{body}}}"), edition)
-                        .or_else(|_| fragment::expression(&format!("({body})"), edition))
-                        .map(|expression| (expression.syntax().clone(), true))
-                });
-            let Ok((root, delimited)) = parsed else {
-                continue;
-            };
-            let mut parents = self.parents.clone();
-            parents.push(MacroFrame {
-                root: self.root.clone(),
-                tree,
-                delimited,
-            });
-            Self {
-                root: root.clone(),
-                node: root,
-                edition,
-                module: self.module.clone(),
-                parents,
-                region: None,
-                declaration: None,
-                symbol: None,
-                argument: false,
+            if let Some(tree) = ast::MacroCall::cast(node).and_then(|call| call.token_tree())
+                && let Some(input) = self.macro_input(tree)
+            {
+                input.visit(nodes);
             }
-            .visit(nodes);
         }
+    }
+
+    pub fn find_at(&self, start: TextSize, matches: &impl Fn(&SyntaxNode) -> bool) -> Option<Self> {
+        let byte = TextRange::at(start.checked_sub(self.offset())?, 1.into());
+        let nodes = std::iter::successors(Some(self.node.clone()), |node| {
+            node.child_or_token_at_range(byte)?.into_node()
+        });
+        for node in nodes {
+            if node.text_range().start() == byte.start() && matches(&node) {
+                return Some(self.at(node));
+            }
+            if let Some(tree) = ast::MacroCall::cast(node).and_then(|call| call.token_tree())
+                && tree.syntax().text_range().contains_range(byte)
+            {
+                return self.macro_input(tree)?.find_at(start, matches);
+            }
+        }
+        None
+    }
+
+    fn macro_input(&self, tree: ast::TokenTree) -> Option<Self> {
+        let text = tree.to_string();
+        let body = text.get(1..text.len().saturating_sub(1))?;
+        let edition = self.edition;
+        let (root, delimited) = fragment::file(body, edition)
+            .map(|root| (root, false))
+            .or_else(|_| {
+                fragment::expression(&format!("{{{body}}}"), edition)
+                    .or_else(|_| fragment::expression(&format!("({body})"), edition))
+                    .map(|expression| (expression.syntax().clone(), true))
+            })
+            .ok()?;
+        let mut input = Self::root(root, edition);
+        input.module = self.module.clone();
+        input.parents = self.parents.clone();
+        input.parents.push(MacroFrame {
+            root: self.root.clone(),
+            tree,
+            delimited,
+        });
+        Some(input)
     }
 }
 

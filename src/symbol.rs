@@ -900,14 +900,12 @@ pub(crate) fn redirect(selected: Selected<'_>, target: &str) -> Result<()> {
 fn current<'a>(source: &'a mut Source, reference: &Location) -> Result<Selected<'a>> {
     let mut root = Location::root(source.root.clone(), source.edition);
     root.module = source.module.clone();
+    let segments =
+        |node: &SyntaxNode| ast::Path::cast(node.clone()).map(|path| path.segments().count());
+    let count = segments(&reference.node);
     let location = root
-        .descendants()
-        .into_iter()
-        .find(|location| {
-            location.node.kind() == reference.node.kind()
-                && location.range().start() == reference.range().start()
-                && ast::Path::cast(location.node.clone()).map(|path| path.segments().count())
-                    == ast::Path::cast(reference.node.clone()).map(|path| path.segments().count())
+        .find_at(reference.range().start(), &|node| {
+            node.kind() == reference.node.kind() && segments(node) == count
         })
         .ok_or("symbol reference is missing during redirection")?;
     Ok(Selected {
