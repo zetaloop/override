@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ra_ap_syntax::{
     AstNode, SyntaxKind, SyntaxNode, ast,
-    ast::{HasGenericArgs, HasLoopBody, HasName},
+    ast::{HasAttrs, HasGenericArgs, HasLoopBody, HasName},
 };
 
 use crate::{Result, Selected, Source, flow, fragment, resolve, source::Location};
@@ -94,6 +94,34 @@ fn scopes(location: &Location) -> Vec<Location> {
         })
         .map(|node| location.at(node))
         .collect()
+}
+
+fn exported(rules: &ast::MacroRules) -> bool {
+    rules
+        .attrs()
+        .any(|attr| attr.simple_name().as_deref() == Some("macro_export"))
+}
+
+fn textual(context: &Location, expected: &str) -> Vec<Binding> {
+    for scope in scopes(context) {
+        let whole = scope.same(context);
+        let declarations = scope.node.children().filter_map(|node| {
+            let rules = ast::MacroRules::cast(node.clone())?;
+            let location = scope.at(node);
+            (rules.name()?.text() == expected
+                && (whole || location.range().end() <= context.range().start()))
+            .then(|| Binding::from(location))
+        });
+        if whole {
+            let declarations: Vec<_> = declarations.collect();
+            if !declarations.is_empty() {
+                return declarations;
+            }
+        } else if let Some(last) = declarations.last() {
+            return vec![last];
+        }
+    }
+    Vec::new()
 }
 
 fn context(location: &Location) -> Location {
@@ -333,6 +361,22 @@ fn lookup(
         }
         return bindings;
     }
+    if namespace == Some(Namespace::Macro) && !text.contains("::") {
+        let macros = textual(context, text);
+        if !macros.is_empty() {
+            return macros;
+        }
+    }
+    path_lookup(definitions, context, text, namespace, visited)
+}
+
+fn path_lookup(
+    definitions: &[Location],
+    context: &Location,
+    text: &str,
+    namespace: Option<Namespace>,
+    visited: &mut HashSet<(SyntaxNode, String, Option<Namespace>)>,
+) -> Vec<Binding> {
     let key = (context.node.clone(), text.to_owned(), namespace);
     if !visited.insert(key.clone()) {
         return Vec::new();
@@ -352,18 +396,21 @@ fn global(
     let direct = definitions
         .iter()
         .filter(|location| {
+            if let Some(rules) = ast::MacroRules::cast(location.node.clone()) {
+                return location.parents.is_empty()
+                    && rules.name().is_some_and(|name| name.text() == text)
+                    && exported(&rules);
+            }
             (ast::Item::can_cast(location.node.kind())
                 || location.node.kind() == SyntaxKind::VARIANT)
                 && full(location) == text
         })
+        .filter(|location| belongs(&location.node, namespace))
         .cloned()
         .map(Binding::from)
         .collect::<Vec<_>>();
     if !direct.is_empty() {
-        return direct
-            .into_iter()
-            .filter(|binding| belongs(&binding.declaration.node, namespace))
-            .collect();
+        return direct;
     }
     let (module, member) = text.rsplit_once("::").unwrap_or(("", text));
     let mut result = Vec::new();
@@ -381,7 +428,7 @@ fn global(
         let node = ast::Module::cast(root.node.clone())
             .and_then(|module| module.item_list())
             .map_or_else(|| root.node.clone(), |list| list.syntax().clone());
-        result.extend(lookup(
+        result.extend(path_lookup(
             definitions,
             &root.at(node),
             member,
@@ -486,33 +533,37 @@ fn lookup_inner(
         let Some(scope) = ancestors.iter().find(|scope| scope.node == node) else {
             continue;
         };
-        let named = definitions
-            .iter()
-            .filter(|location| {
-                ast::Item::can_cast(location.node.kind())
-                    && !location
-                        .node
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
-                    && name(&location.node).as_deref() == Some(text)
-                    && scopes(location)
-                        .into_iter()
-                        .find(|parent| !parent.same(location))
-                        .is_some_and(|parent| {
-                            parent.same(scope)
-                                || (parent.node.kind() != SyntaxKind::STMT_LIST
-                                    && scope.node.kind() != SyntaxKind::STMT_LIST
-                                    && resolve::module_path(&parent) == resolve::module_path(scope))
-                        })
-            })
-            .collect::<Vec<_>>();
-        declared |= !named.is_empty();
-        let mut result = named
-            .into_iter()
-            .filter(|location| belongs(&location.node, namespace))
-            .cloned()
-            .map(Binding::from)
-            .collect::<Vec<_>>();
+        let mut result = Vec::new();
+        for location in definitions.iter().filter(|location| {
+            ast::Item::can_cast(location.node.kind())
+                && !location
+                    .node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
+                && name(&location.node).as_deref() == Some(text)
+        }) {
+            let rules = ast::MacroRules::cast(location.node.clone());
+            let at_root = scope.node.kind() == SyntaxKind::SOURCE_FILE
+                && scope.module.is_empty()
+                && location.parents.is_empty()
+                && rules.as_ref().is_some_and(exported);
+            if at_root
+                || scopes(location)
+                    .into_iter()
+                    .find(|parent| !parent.same(location))
+                    .is_some_and(|parent| {
+                        parent.same(scope)
+                            || (parent.node.kind() != SyntaxKind::STMT_LIST
+                                && scope.node.kind() != SyntaxKind::STMT_LIST
+                                && resolve::module_path(&parent) == resolve::module_path(scope))
+                    })
+            {
+                declared = true;
+                if (rules.is_none() || at_root) && belongs(&location.node, namespace) {
+                    result.push(Binding::from(location.clone()));
+                }
+            }
+        }
         let mut glob = Vec::new();
         for import in scope.node.children().filter_map(ast::Use::cast) {
             let Some(tree) = import.use_tree() else {
