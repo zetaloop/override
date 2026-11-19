@@ -5,13 +5,60 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  draft:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: macos-26-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu.2.34 }
+          - { os: ubuntu-26.04-arm, target: aarch64-unknown-linux-gnu.2.34 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-26.04-arm, target: aarch64-unknown-linux-musl }
     steps:
-      - run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
+        with:
+          cache-key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild
+      - uses: taiki-e/upload-rust-binary-action@v1
+        id: package
+        with:
+          bin: override
+          target: ${{ matrix.target }}
+          build-tool: ${{ runner.os == 'Linux' && 'cargo-zigbuild' || 'cargo' }}
+          locked: true
+          dry-run: true
+          include: LICENSE
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.tar || steps.package.outputs.zip }}
+          archive: false
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

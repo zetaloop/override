@@ -16,7 +16,7 @@ fn main() -> Result<()> {
 The CLI can also build a project against a compatible replacement library. To try one from a local checkout:
 
 ```sh
-cargo install override
+cargo binstall override
 override with --path ../my-runtime -- build
 ```
 
