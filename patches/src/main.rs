@@ -72,6 +72,7 @@ fn main() -> Result<()> {
             if name == "override-syntax" {
                 redirect(dependencies, "parser", "override-parser", &version)?;
                 dependencies.remove("unicode-ident");
+                dependencies.remove("unicode-properties");
                 manifest["package"]
                     .as_table_mut()
                     .ok_or("package is not a table")?
