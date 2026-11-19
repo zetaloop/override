@@ -198,7 +198,7 @@ impl Provider {
             };
             fs::create_dir(&path)?;
             fs::write(path.join("Cargo.toml"), toml::to_string(&manifest)?)?;
-            fs::write(path.join("lib.rs"), export)?;
+            fs::write(path.join("lib.rs"), format!("#![no_std]\n\n{export}"))?;
             let entries = config.patch.entry(source.into()).or_default();
             if entries
                 .insert(
