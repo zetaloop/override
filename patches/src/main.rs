@@ -4,6 +4,7 @@ use r#override::{Manifest, Package, Result, Sources, root};
 use toml::Value;
 
 mod data;
+mod stdlib;
 
 fn main() -> Result<()> {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/out");
@@ -25,6 +26,9 @@ fn main() -> Result<()> {
         let mut sources = prepare(upstream, &out.join(name), name, version)?;
         if name == "override-lexer" {
             embed_unicode(&mut sources, &patches)?;
+        }
+        if name == "override-mbe" {
+            stdlib::embed(&mut sources)?;
         }
         sources.manifest(|manifest| {
             let dependencies = table(manifest, "dependencies")?;

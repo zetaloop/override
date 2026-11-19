@@ -59,6 +59,7 @@ jobs:
             sleep 1
           done
           if ((${#missing[@]})); then
+            rustup component add rust-src --toolchain stable
             cargo +stable run --locked --manifest-path patches/Cargo.toml
             for crate in "${missing[@]}"; do
               cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml"
