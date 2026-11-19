@@ -12,6 +12,8 @@ use crate::{
     package::{edition, output},
 };
 
+mod manifest;
+
 const OWNER: &str = "Source directory prepared by override.\n";
 const MARKER: &str = ".override-source";
 
@@ -26,6 +28,7 @@ impl Package {
         let source = fs::canonicalize(self.directory())?;
         let mut files = BTreeMap::new();
         let mut archive = None;
+        let mut manifest = None;
         if let Some(registry) = self.data().source.as_ref().and_then(|source| {
             source.repr.strip_prefix("registry+").or_else(|| {
                 source
@@ -119,6 +122,7 @@ impl Package {
                             .map(|path| (PathBuf::from(name), PathBuf::from(path)))
                     }),
             );
+            manifest = manifest::prepare(self, &files)?;
         }
         let destination = destination.as_ref();
         if destination.try_exists()? && fs::symlink_metadata(destination)?.file_type().is_symlink()
@@ -147,6 +151,10 @@ impl Package {
             fs::create_dir(&destination)?;
         }
         fs::write(destination.join(MARKER), OWNER)?;
+        if let Some(manifest) = manifest {
+            files.remove(Path::new("Cargo.toml"));
+            fs::write(destination.join("Cargo.toml"), manifest)?;
+        }
         if let Some(mut archive) = archive {
             let prefix = format!("{}-{}", self.data().name, self.data().version);
             for entry in archive.entries()? {
