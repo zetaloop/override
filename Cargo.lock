@@ -291,6 +291,8 @@ dependencies = [
 [[package]]
 name = "override-lexer"
 version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09261bc86d36c52fab85129af65dbae9a4e0d0bfa7e90579e4055a7c13d8c393"
 dependencies = [
  "memchr",
 ]
@@ -298,6 +300,8 @@ dependencies = [
 [[package]]
 name = "override-parser"
 version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ac571b0400338aa811657daa171e135ee6b752616cb9863fe33cfef181aac1"
 dependencies = [
  "drop_bomb",
  "override-lexer",
@@ -310,6 +314,8 @@ dependencies = [
 [[package]]
 name = "override-syntax"
 version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0c0253b5379e18e81566e8cbf9107ca98dcc8851c7d6ea0251e4d9aeacf5281"
 dependencies = [
  "either",
  "itertools",
