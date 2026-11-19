@@ -408,7 +408,7 @@ impl Selector {
             }
             current.clear();
             for candidate in next {
-                if !current.iter().any(|existing| candidate.same(existing)) {
+                if !current.contains(&candidate) {
                     current.push(candidate);
                 }
             }

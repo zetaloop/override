@@ -229,6 +229,17 @@ pub(crate) struct Location {
     pub argument: bool,
 }
 
+impl PartialEq for Location {
+    fn eq(&self, other: &Self) -> bool {
+        self.symbol == other.symbol
+            && self.argument == other.argument
+            && self.region.is_some() == other.region.is_some()
+            && self.module == other.module
+            && self.same(other)
+            && self.declaration == other.declaration
+    }
+}
+
 impl Location {
     pub fn root(root: SyntaxNode, edition: Edition) -> Self {
         Self {
