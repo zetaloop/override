@@ -10,15 +10,63 @@ fn main() -> Result<()> {
     let patches = Package::load(env!("CARGO_MANIFEST_PATH"))?;
     let version = env!("CARGO_PKG_VERSION");
     let syntax = patches.dependency("ra_ap_syntax")?;
-    let parser = syntax.dependency("parser")?;
-    let lexer = syntax.dependency("ra-ap-rustc_lexer")?;
+    let mbe = patches.dependency("ra_ap_mbe")?;
+    let packages = [
+        ("override-lexer", syntax.dependency("ra-ap-rustc_lexer")?),
+        ("override-parser", syntax.dependency("parser")?),
+        ("override-syntax", syntax),
+        ("override-span", mbe.dependency("span")?),
+        ("override-tt", mbe.dependency("tt")?),
+        ("override-syntax-bridge", mbe.dependency("syntax-bridge")?),
+        ("override-mbe", mbe),
+    ];
 
-    let mut sources = prepare(
-        &lexer,
-        &out.join("override-lexer"),
-        "override-lexer",
-        version,
-    )?;
+    for &(name, ref upstream) in &packages {
+        let mut sources = prepare(upstream, &out.join(name), name, version)?;
+        if name == "override-lexer" {
+            embed_unicode(&mut sources, &patches)?;
+        }
+        sources.manifest(|manifest| {
+            let dependencies = table(manifest, "dependencies")?;
+            if matches!(name, "override-lexer" | "override-syntax") {
+                dependencies.remove("unicode-ident");
+                dependencies.remove("unicode-properties");
+            }
+            for (alias, entry) in dependencies {
+                let package = entry
+                    .get("package")
+                    .and_then(Value::as_str)
+                    .unwrap_or(alias);
+                if let Some(&(replacement, _)) = packages
+                    .iter()
+                    .find(|(_, p)| p.data().name.as_str() == package)
+                {
+                    let dep = entry
+                        .as_table_mut()
+                        .ok_or_else(|| format!("invalid dependency `{alias}`"))?;
+                    dep.insert("package".into(), replacement.into());
+                    dep.insert("version".into(), format!("={version}").into());
+                    dep.insert("path".into(), format!("../{replacement}").into());
+                }
+            }
+            if name == "override-syntax" {
+                table(manifest, "package")?.remove("metadata");
+            }
+            Ok(())
+        })?;
+    }
+
+    let members: Vec<_> = packages.iter().map(|(name, _)| *name).collect();
+    let workspace = toml::toml! {
+        [workspace]
+        members = (members)
+        resolver = "3"
+    };
+    fs::write(out.join("Cargo.toml"), toml::to_string(&workspace)?)?;
+    Ok(())
+}
+
+fn embed_unicode(sources: &mut Sources, patches: &Package) -> Result<()> {
     sources.edit("src/lib.rs", |source| {
         source.select(root())?.add_use(
             "use crate::unicode::{ident as unicode_ident, properties as unicode_properties};",
@@ -35,49 +83,6 @@ fn main() -> Result<()> {
             .directory()
             .join("LICENSE-UNICODE"),
         sources.path("LICENSE-UNICODE")?,
-    )?;
-    sources.manifest(|manifest| {
-        manifest["package"]["license"] = "MIT AND Unicode-3.0".into();
-        let dependencies = table(manifest, "dependencies")?;
-        dependencies.remove("unicode-ident");
-        dependencies.remove("unicode-properties");
-        Ok(())
-    })?;
-
-    for (upstream, name, replaced, replacement) in [
-        (
-            &parser,
-            "override-parser",
-            "ra-ap-rustc_lexer",
-            "override-lexer",
-        ),
-        (
-            &syntax,
-            "override-syntax",
-            "ra-ap-rustc_lexer",
-            "override-lexer",
-        ),
-    ] {
-        let mut sources = prepare(upstream, &out.join(name), name, version)?;
-        sources.manifest(|manifest| {
-            let dependencies = table(manifest, "dependencies")?;
-            redirect(dependencies, replaced, replacement, version)?;
-            if name == "override-syntax" {
-                redirect(dependencies, "parser", "override-parser", version)?;
-                dependencies.remove("unicode-ident");
-                dependencies.remove("unicode-properties");
-                manifest["package"]
-                    .as_table_mut()
-                    .ok_or("package is not a table")?
-                    .remove("metadata");
-            }
-            Ok(())
-        })?;
-    }
-
-    fs::write(
-        out.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"override-lexer\", \"override-parser\", \"override-syntax\"]\nresolver = \"3\"\n",
     )?;
     Ok(())
 }
@@ -105,7 +110,12 @@ fn prepare(upstream: &Package, out: &Path, name: &str, version: &str) -> Result<
         let package = table(manifest, "package")?;
         package.insert("name".into(), name.into());
         package.insert("version".into(), version.into());
-        package.insert("license".into(), "MIT".into());
+        let license = if name == "override-lexer" {
+            "MIT AND Unicode-3.0"
+        } else {
+            "MIT"
+        };
+        package.insert("license".into(), license.into());
         package.insert(
             "description".into(),
             format!("{} {} for override", data.name, data.version).into(),
@@ -128,15 +138,4 @@ fn table<'a>(manifest: &'a mut Manifest, name: &str) -> Result<&'a mut Manifest>
         .get_mut(name)
         .and_then(Value::as_table_mut)
         .ok_or_else(|| format!("manifest has no {name} table").into())
-}
-
-fn redirect(dependencies: &mut Manifest, alias: &str, package: &str, version: &str) -> Result<()> {
-    let dependency = dependencies
-        .get_mut(alias)
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| format!("manifest has no dependency `{alias}`"))?;
-    dependency.insert("package".into(), package.into());
-    dependency.insert("version".into(), format!("={version}").into());
-    dependency.insert("path".into(), format!("../{package}").into());
-    Ok(())
 }

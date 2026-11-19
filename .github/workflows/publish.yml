@@ -45,11 +45,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - name: Publish generated parser crates
+      - name: Publish generated crates
         run: |
           version=$(cargo +stable metadata --manifest-path patches/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[0].version')
           missing=()
-          for crate in override-lexer override-parser override-syntax; do
+          for crate in override-lexer override-parser override-syntax override-span override-tt override-syntax-bridge override-mbe; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/$crate/$version")
             case "$code" in
               200) echo "$crate $version already published" ;;
