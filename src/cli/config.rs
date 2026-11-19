@@ -26,10 +26,14 @@ struct Store {
     _lock: File,
 }
 
+pub fn home() -> Result<PathBuf> {
+    cargo_config2::cargo_home_with_cwd(&env::current_dir()?)
+        .ok_or_else(|| "Cargo home directory is unavailable".into())
+}
+
 impl Store {
     fn open() -> Result<Self> {
-        let home = cargo_config2::cargo_home_with_cwd(&env::current_dir()?)
-            .ok_or("Cargo home directory is unavailable")?;
+        let home = home()?;
         let root = home.join("override");
         fs::create_dir_all(&root)?;
         let lock = File::options()
@@ -88,10 +92,7 @@ fn identity(file: &Path) -> Result<(&str, &str)> {
 
 pub fn enable(provider: Provider) -> Result<()> {
     let mut store = Store::open()?;
-    let dir = tempfile::Builder::new()
-        .prefix("entry-")
-        .tempdir_in(store.home.join("override"))?;
-    let file = provider.write(dir.path())?;
+    let file = provider.prepare(&store.home)?;
     let file = file.strip_prefix(&store.home)?;
     let (name, _) = identity(file)?;
     let new = store.fragment(file)?;
@@ -113,24 +114,19 @@ pub fn enable(provider: Provider) -> Result<()> {
     }
     new.resolve(&store.home.join(file))?;
     include(&store.home)?;
-    let previous = store.providers.insert(name.into(), file.into());
-    store.save()?;
-    let _ = dir.keep();
-    if let Some(previous) = previous {
-        fs::remove_dir_all(store.home.join(previous).parent().unwrap())?;
+    if store.providers.insert(name.into(), file.into()).as_deref() != Some(file) {
+        store.save()?;
     }
     Ok(())
 }
 
 pub fn disable(name: &str) -> Result<()> {
     let mut store = Store::open()?;
-    let file = store
+    store
         .providers
         .remove(name)
         .ok_or_else(|| format!("{name} is not enabled"))?;
-    store.save()?;
-    fs::remove_dir_all(store.home.join(file).parent().unwrap())?;
-    Ok(())
+    store.save()
 }
 
 pub fn list() -> Result<()> {

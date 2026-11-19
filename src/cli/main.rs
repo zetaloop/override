@@ -40,8 +40,7 @@ fn run(args: &[OsString]) -> Result<i32> {
             if cargo.is_empty() {
                 return Err(USAGE.into());
             }
-            let directory = tempfile::tempdir()?;
-            let config = Provider::load(provider)?.write(directory.path())?;
+            let config = Provider::load(provider)?.prepare(&config::home()?)?;
             let status =
                 process::Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
                     .arg("--config")

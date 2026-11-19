@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -23,12 +24,12 @@ struct Replacement {
     module: Option<String>,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, Hash, Serialize)]
 pub struct Fragment {
     pub patch: BTreeMap<String, BTreeMap<String, Entry>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Hash, Serialize)]
 pub struct Entry {
     path: PathBuf,
     pub version: Version,
@@ -147,8 +148,9 @@ impl Provider {
         })
     }
 
-    pub fn write(&self, directory: &Path) -> Result<PathBuf> {
+    pub fn prepare(&self, home: &Path) -> Result<PathBuf> {
         let mut config = Fragment::default();
+        let mut crates = Vec::new();
         let features: Manifest = self
             .package
             .features
@@ -162,7 +164,6 @@ impl Provider {
             .collect();
         for (i, target) in self.replaces.iter().enumerate() {
             let source = target.git.as_deref().unwrap_or("crates-io");
-            let path = directory.join(i.to_string());
             let mut manifest = toml::toml! {
                 [workspace]
                 [package]
@@ -196,15 +197,16 @@ impl Provider {
                 }
                 None => "pub use ::implementation::*;\n".into(),
             };
-            fs::create_dir(&path)?;
-            fs::write(path.join("Cargo.toml"), toml::to_string(&manifest)?)?;
-            fs::write(path.join("lib.rs"), format!("#![no_std]\n\n{export}"))?;
+            crates.push((
+                toml::to_string(&manifest)?,
+                format!("#![no_std]\n\n{export}"),
+            ));
             let entries = config.patch.entry(source.into()).or_default();
             if entries
                 .insert(
                     target.package.clone(),
                     Entry {
-                        path,
+                        path: i.to_string().into(),
                         version: target.version.clone(),
                     },
                 )
@@ -215,11 +217,37 @@ impl Provider {
                 );
             }
         }
-        let path = directory.join(format!(
-            "{}@{}.toml",
-            self.package.name, self.package.version
-        ));
-        fs::write(&path, toml::to_string(&config)?)?;
+        let mut key = DefaultHasher::new();
+        (
+            &self.package.id,
+            self.package.source.as_ref().map(|s| &s.repr),
+            &crates,
+            &config,
+        )
+            .hash(&mut key);
+        let cache = home.join("override");
+        let directory = cache.join(format!("entry-{:016x}", key.finish()));
+        let name = format!("{}@{}.toml", self.package.name, self.package.version);
+        let path = directory.join(&name);
+        if !path.try_exists()? {
+            fs::create_dir_all(&cache)?;
+            let temp = tempfile::tempdir_in(cache)?;
+            for (i, (manifest, export)) in crates.iter().enumerate() {
+                let entry = temp.path().join(i.to_string());
+                fs::create_dir(&entry)?;
+                fs::write(entry.join("Cargo.toml"), manifest)?;
+                fs::write(entry.join("lib.rs"), export)?;
+            }
+            for entry in config.patch.values_mut().flat_map(BTreeMap::values_mut) {
+                entry.path = directory.join(&entry.path);
+            }
+            fs::write(temp.path().join(name), toml::to_string(&config)?)?;
+            if let Err(error) = fs::rename(temp.path(), &directory)
+                && !path.try_exists()?
+            {
+                return Err(error.into());
+            }
+        }
         Ok(path)
     }
 }
