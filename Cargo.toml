@@ -1,6 +1,6 @@
 [package]
 name = "override"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Symbol-based Rust source editing and dependency patching"
 repository = "https://github.com/zetaloop/override"
@@ -15,7 +15,7 @@ required-features = ["build"]
 cargo-config2 = { version = "0.1.45", optional = true }
 cargo_metadata = { version = "0.23.1", optional = true }
 flate2 = { version = "1.1.11", optional = true }
-ra_ap_syntax = { version = "0.4.0", package = "override-syntax" }
+ra_ap_syntax = { version = "0.5.0", package = "override-syntax" }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 tar = { version = "0.4.46", optional = true, default-features = false }

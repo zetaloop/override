@@ -274,7 +274,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "override"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cargo-config2",
  "cargo_metadata",
@@ -290,18 +290,14 @@ dependencies = [
 
 [[package]]
 name = "override-lexer"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c1abddcae7e3a1c9b8db37dc49ef70da6a8daeb1a0cd609cee09368e24da977"
+version = "0.5.0"
 dependencies = [
  "memchr",
 ]
 
 [[package]]
 name = "override-parser"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be33781e94a201f067d37547b102863704a393859515d03085c067f638b8147f"
+version = "0.5.0"
 dependencies = [
  "drop_bomb",
  "override-lexer",
@@ -313,9 +309,7 @@ dependencies = [
 
 [[package]]
 name = "override-syntax"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c0d82fd646e8f93d271db92cbbaec6b18f5858f0c8e93fb06d7147ba65212fa"
+version = "0.5.0"
 dependencies = [
  "either",
  "itertools",
@@ -357,15 +351,15 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_edition"
-version = "0.0.360"
+version = "0.0.363"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "408235fd4b7b1f6d9865b84b5ba78be7d21428448559ed2a6701c3529cc1943d"
+checksum = "537f158d48e45e27fc96049b4474f08f4f2a43f314e3a94358ae848cdf4506a4"
 
 [[package]]
 name = "ra_ap_stdx"
-version = "0.0.360"
+version = "0.0.363"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f65a0ded5521db034ec5c43f4fa881ddedd4224daf2c2832bf0bac997254c1"
+checksum = "8148b3ba69f99b411f76b75995f77fa80ede17c994c0df3cc292b176826de311"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -373,15 +367,16 @@ dependencies = [
  "jod-thread",
  "libc",
  "miow",
+ "thin-vec",
  "tracing",
  "windows-sys",
 ]
 
 [[package]]
 name = "rowan"
-version = "0.17.0"
+version = "0.18.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14b574c58582fa59fa43a2feb6608b8744184659f08a2e0117e4b8224d95ed61"
+checksum = "aaea44c3d95fde0fcd2f4207a3de502924cc484eecdf76af64895afd4207dec5"
 dependencies = [
  "countme",
  "hashbrown 0.14.5",
@@ -404,9 +399,9 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc-literal-escaper"
-version = "0.0.7"
+version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be87abb9e40db7466e0681dc8ecd9dcfd40360cb10b4c8fe24a7c4c3669b198"
+checksum = "bfe6f213fb658c8fb95baabd5420393438cf5a98d707f5dd701d9197c705f71e"
 
 [[package]]
 name = "rustix"
@@ -543,6 +538,12 @@ name = "text-size"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
+
+[[package]]
+name = "thin-vec"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6a4b9ba8738cb4a4f399d37e266becfd475e75eb73425b87a05a2f2039ba63e"
 
 [[package]]
 name = "thiserror"
