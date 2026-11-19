@@ -633,13 +633,20 @@ impl Selected<'_> {
                     return Err("use delegate to redirect a method to a qualified function".into());
                 }
                 let name = call.name_ref().ok_or("method call has no name")?;
-                editor.replace(
-                    name.syntax(),
-                    path.segment()
-                        .and_then(|segment| segment.name_ref())
-                        .ok_or("target has no name")?
-                        .syntax(),
-                );
+                let segment = path.segment();
+                let target_name = segment
+                    .as_ref()
+                    .and_then(ast::PathSegment::name_ref)
+                    .ok_or("target has no name")?;
+                let mut replacement = vec![target_name.syntax().clone().into()];
+                if let Some(arguments) = segment.and_then(|segment| segment.generic_arg_list()) {
+                    if let Some(old) = call.generic_arg_list() {
+                        editor.replace(old.syntax(), arguments.syntax());
+                    } else {
+                        replacement.push(arguments.syntax().clone().into());
+                    }
+                }
+                editor.replace_with_many(name.syntax(), replacement);
             } else if let Some(call) = ast::CallExpr::cast(node.clone()) {
                 let original = call.expr().ok_or("call has no target")?;
                 let generics = match &original {
