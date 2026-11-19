@@ -4,49 +4,175 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag
+        type: string
+        required: true
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency: publish-${{ inputs.tag || github.event.release.tag_name }}
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  USER_AGENT: override-release/${{ inputs.tag || github.event.release.tag_name }} (https://github.com/${{ github.repository }})
 
 jobs:
-  publish:
+  parsers:
     environment: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      commit: ${{ steps.checkout.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
+        id: checkout
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
+      - run: rustup update stable
+      - name: Select published release
+        run: |
+          version=$(cargo +stable metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "$RELEASE_TAG points to override $version"; exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft | jq -e '.isDraft == false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish generated parser crates
+        run: |
+          version=$(cargo +stable metadata --manifest-path patches/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[0].version')
+          missing=()
+          for crate in override-lexer override-parser override-syntax; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/$crate/$version")
+            case "$code" in
+              200) echo "$crate $version already published" ;;
+              404) missing+=("$crate") ;;
+              *) echo "crates.io answered $code for $crate $version"; exit 1 ;;
+            esac
+            sleep 1
+          done
+          if ((${#missing[@]})); then
+            cargo +stable run --locked --manifest-path patches/Cargo.toml
+            for crate in "${missing[@]}"; do
+              cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml"
+            done
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Resolve release dependencies
+        run: |
+          for _ in 1 2 3 4; do
+            cargo +stable fetch && exit 0
+            sleep 15
+          done
+          cargo +stable fetch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cargo-lock
+          path: Cargo.lock
+          overwrite: true
+          if-no-files-found: error
+
+  build:
+    needs: parsers
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: macos-26-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu.2.34 }
+          - { os: ubuntu-26.04-arm, target: aarch64-unknown-linux-gnu.2.34 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-26.04-arm, target: aarch64-unknown-linux-musl }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.parsers.outputs.commit }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: cargo-lock
+      - run: rustup update stable
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
+        with:
+          cache-key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild
+      - uses: taiki-e/upload-rust-binary-action@v1
+        id: package
+        with:
+          bin: override
+          target: ${{ matrix.target }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          build-tool: ${{ runner.os == 'Linux' && 'cargo-zigbuild' || 'cargo' }}
+          locked: true
+          dry-run: true
+          include: LICENSE
+      - uses: actions/upload-artifact@v7
+        with:
+          name: &archive ${{ steps.package.outputs.tar || steps.package.outputs.zip }}
+          path: *archive
+          archive: false
+          overwrite: true
+          if-no-files-found: error
+
+  assets:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: override-*
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+      - name: Upload CLI archives
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+  publish:
+    needs: [parsers, assets]
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.parsers.outputs.commit }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: cargo-lock
       - run: rustup update stable
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - run: cargo +stable run --manifest-path patches/Cargo.toml
-      - name: Publish generated parser crates
-        run: |
-          for crate in override-lexer override-parser override-syntax; do
-            version=$(cargo +stable metadata --manifest-path "patches/target/out/$crate/Cargo.toml" --no-deps --format-version 1 | jq -r '.packages[0].version')
-            code=$(curl -s -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/$crate/$version")
-            case "$code" in
-              200) echo "$crate $version already published" ;;
-              404) cargo +stable publish --manifest-path "patches/target/out/$crate/Cargo.toml" ;;
-              *) echo "crates.io answered $code for $crate $version"; exit 1 ;;
-            esac
-          done
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          USER_AGENT: override-release (https://github.com/${{ github.repository }})
       - name: Publish override
         run: |
-          version=$(cargo +stable metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          code=$(curl -s -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/override/$version")
+          version=${RELEASE_TAG#v}
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/override/$version")
           case "$code" in
             200) echo "override $version already published"; exit 0 ;;
             404) ;;
             *) echo "crates.io answered $code for override $version"; exit 1 ;;
           esac
-          for _ in 1 2 3 4 5; do
-            cargo +stable publish --allow-dirty && exit 0
-            sleep 15
-          done
-          exit 1
+          cargo +stable publish --locked --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          USER_AGENT: override-release (https://github.com/${{ github.repository }})

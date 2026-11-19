@@ -1,21 +1,14 @@
 use std::{env, fs, path::Path};
 
 use r#override::{Manifest, Package, Result, Sources, root};
-use toml::{Table, Value};
+use toml::Value;
 
 mod data;
 
 fn main() -> Result<()> {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/out");
     let patches = Package::load(env!("CARGO_MANIFEST_PATH"))?;
-    let version = include_str!("../../Cargo.toml")
-        .parse::<Table>()?
-        .get("package")
-        .and_then(Value::as_table)
-        .and_then(|package| package.get("version"))
-        .and_then(Value::as_str)
-        .ok_or("root manifest has no package version")?
-        .to_owned();
+    let version = env!("CARGO_PKG_VERSION");
     let syntax = patches.dependency("ra_ap_syntax")?;
     let parser = syntax.dependency("parser")?;
     let lexer = syntax.dependency("ra-ap-rustc_lexer")?;
@@ -24,7 +17,7 @@ fn main() -> Result<()> {
         &lexer,
         &out.join("override-lexer"),
         "override-lexer",
-        &version,
+        version,
     )?;
     sources.edit("src/lib.rs", |source| {
         source.select(root())?.add_use(
@@ -65,12 +58,12 @@ fn main() -> Result<()> {
             "override-lexer",
         ),
     ] {
-        let mut sources = prepare(upstream, &out.join(name), name, &version)?;
+        let mut sources = prepare(upstream, &out.join(name), name, version)?;
         sources.manifest(|manifest| {
             let dependencies = table(manifest, "dependencies")?;
-            redirect(dependencies, replaced, replacement, &version)?;
+            redirect(dependencies, replaced, replacement, version)?;
             if name == "override-syntax" {
-                redirect(dependencies, "parser", "override-parser", &version)?;
+                redirect(dependencies, "parser", "override-parser", version)?;
                 dependencies.remove("unicode-ident");
                 dependencies.remove("unicode-properties");
                 manifest["package"]
