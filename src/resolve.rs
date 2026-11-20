@@ -216,65 +216,164 @@ pub(crate) fn types_equal(
     left: &ast::Type,
     right: &ast::Type,
 ) -> bool {
-    fn expand(source: &Source, mut context: Location, mut ty: ast::Type) -> ast::Type {
-        let mut seen = HashSet::new();
-        loop {
-            if !matches!(ty, ast::Type::PathType(_)) {
-                return ty;
-            }
-            let text = fragment::spelling(ty.syntax());
-            if !seen.insert((module_path(&context), text.clone())) {
-                return ty;
-            }
-            if context
-                .ancestors()
-                .iter()
-                .flat_map(|node| node.children())
-                .filter_map(ast::GenericParamList::cast)
-                .flat_map(|list| list.generic_params())
-                .any(|parameter| {
-                    parameter
-                        .syntax()
-                        .children()
-                        .find_map(ast::Name::cast)
-                        .is_some_and(|name| name.text() == text)
-                })
+    #[derive(Clone, PartialEq)]
+    enum Part {
+        Name(String),
+        Declaration(SyntaxNode),
+        Argument(Vec<Part>),
+    }
+    fn parts(
+        defs: &[Location],
+        at: &Location,
+        node: &SyntaxNode,
+        substitutions: &[(String, Vec<Part>)],
+        aliases: &mut HashSet<SyntaxNode>,
+    ) -> Option<Vec<Part>> {
+        if let Some(inner) = ast::ParenType::cast(node.clone()).and_then(|p| p.ty()) {
+            return parts(defs, at, inner.syntax(), substitutions, aliases);
+        }
+        if let Some(path) = ast::Path::cast(node.clone())
+            && path.segments().all(|s| {
+                s.name_ref().is_some()
+                    && s.parenthesized_arg_list().is_none()
+                    && s.type_anchor().is_none()
+                    && s.return_type_syntax().is_none()
+            })
+            && path
+                .qualifier()
+                .is_none_or(|p| p.segments().all(|s| s.generic_arg_list().is_none()))
+        {
+            let name = path_name(&path);
+            let args = path.segment()?.generic_arg_list();
+            if args.is_none()
+                && let Some((_, value)) = substitutions.iter().find(|(p, _)| p == &name)
             {
-                return ty;
+                return Some(value.clone());
             }
-            let paths = paths(&context, &text);
-            let aliases = declarations(source)
-                .into_iter()
-                .filter_map(|(module, location)| {
-                    let alias = ast::TypeAlias::cast(location.node.clone())?;
-                    let name = [module, qualified(&location)]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    if !paths.contains(&name)
-                        || alias
-                            .syntax()
-                            .children()
-                            .any(|node| ast::GenericParamList::can_cast(node.kind()))
-                    {
-                        return None;
+            let ns = if path
+                .syntax()
+                .parent()
+                .is_some_and(|n| ast::PathExpr::can_cast(n.kind()))
+            {
+                Namespace::Value
+            } else {
+                Namespace::Type
+            };
+            let bindings = symbol::lookup(defs, at, &name, Some(ns), &mut HashSet::new());
+            let mut result = match bindings.as_slice() {
+                [b] if b.unresolved.is_none() => {
+                    let declaration = &b.declaration.node;
+                    let body =
+                        ast::TypeAlias::cast(declaration.clone()).and_then(|alias| alias.ty());
+                    let generics = declaration.children().find_map(ast::GenericParamList::cast);
+                    if body.is_some() || generics.is_some() {
+                        let mut actual = args
+                            .iter()
+                            .flat_map(|l| l.generic_args())
+                            .map(|arg| {
+                                Some((
+                                    arg.clone(),
+                                    parts(defs, at, arg.syntax(), substitutions, aliases)?,
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()?
+                            .into_iter()
+                            .peekable();
+                        let mut params = Vec::new();
+                        for p in generics.into_iter().flat_map(|l| l.generic_params()) {
+                            let key = p
+                                .syntax()
+                                .children()
+                                .find(|n| {
+                                    matches!(n.kind(), SyntaxKind::NAME | SyntaxKind::LIFETIME)
+                                })?
+                                .to_string();
+                            let value = if matches!(p, ast::GenericParam::LifetimeParam(_))
+                                && !matches!(
+                                    actual.peek(),
+                                    Some((ast::GenericArg::LifetimeArg(_), _))
+                                ) {
+                                vec![Part::Name("'_".into())]
+                            } else if let Some((_, value)) = actual.next_if(|(arg, _)| {
+                                !matches!(arg, ast::GenericArg::AssocTypeArg(_))
+                            }) {
+                                value
+                            } else {
+                                let default = match p {
+                                    ast::GenericParam::TypeParam(t) => {
+                                        t.default_type()?.syntax().clone()
+                                    }
+                                    ast::GenericParam::ConstParam(c) => {
+                                        c.default_val()?.syntax().clone()
+                                    }
+                                    _ => return None,
+                                };
+                                if !aliases.insert(default.clone()) {
+                                    return None;
+                                }
+                                let value =
+                                    parts(defs, &b.declaration, &default, &params, aliases)?;
+                                aliases.remove(&default);
+                                value
+                            };
+                            params.push((key, value));
+                        }
+                        if let Some(body) = body {
+                            if actual.next().is_some() || !aliases.insert(declaration.clone()) {
+                                return None;
+                            }
+                            let value =
+                                parts(defs, &b.declaration, body.syntax(), &params, aliases);
+                            aliases.remove(declaration);
+                            return value;
+                        }
+                        let mut result = vec![Part::Declaration(declaration.clone())];
+                        result.extend(params.into_iter().map(|(_, v)| Part::Argument(v)));
+                        for (arg, v) in actual {
+                            if !matches!(arg, ast::GenericArg::AssocTypeArg(_)) {
+                                return None;
+                            }
+                            result.push(Part::Argument(v));
+                        }
+                        return Some(result);
                     }
-                    Some((location, alias.ty()?))
-                })
-                .collect::<Vec<_>>();
-            match aliases.as_slice() {
-                [(location, alias)] => {
-                    context = location.clone();
-                    ty = alias.clone();
+                    vec![Part::Declaration(b.declaration.node.clone())]
                 }
-                _ => return ty,
+                [b] if b.imports.is_empty() && path.qualifier().is_none() => vec![Part::Name(name)],
+                [b] => vec![Part::Name(b.unresolved.clone()?)],
+                [] => vec![Part::Name(name)],
+                _ => return None,
+            };
+            if let Some(args) = args {
+                result.extend(parts(defs, at, args.syntax(), substitutions, aliases)?);
+            }
+            return Some(result);
+        }
+        if ast::Lifetime::can_cast(node.kind())
+            && let Some((_, value)) = substitutions.iter().find(|(p, _)| p == &node.to_string())
+        {
+            return Some(value.clone());
+        }
+        let mut result = Vec::new();
+        for element in node.children_with_tokens() {
+            match element {
+                ra_ap_syntax::NodeOrToken::Node(n) => {
+                    result.extend(parts(defs, at, &n, substitutions, aliases)?)
+                }
+                ra_ap_syntax::NodeOrToken::Token(t) if !t.kind().is_trivia() => {
+                    result.push(Part::Name(t.text().to_owned()))
+                }
+                _ => {}
             }
         }
+        Some(result)
     }
-    let left = expand(source, context.clone(), left.clone());
-    let right = expand(source, context.clone(), right.clone());
-    fragment::equivalent(left.syntax(), right.syntax())
+    let defs = declarations(source)
+        .into_iter()
+        .map(|(_, at)| at)
+        .collect::<Vec<_>>();
+    let resolve = |ty: &ast::Type| parts(&defs, context, ty.syntax(), &[], &mut HashSet::new());
+    resolve(left).is_some_and(|left| Some(left) == resolve(right))
 }
 
 pub(crate) fn import_path(tree: &ast::UseTree) -> String {
