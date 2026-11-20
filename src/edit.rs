@@ -905,9 +905,6 @@ impl Selected<'_> {
             let params = generated
                 .param_list()
                 .ok_or("extracted function has no parameters")?;
-            if params.params().count() != arguments.len() {
-                return Err("signature and call have different argument counts".into());
-            }
             let inputs = arguments
                 .iter()
                 .map(|text| fragment::expression(text, edition))
