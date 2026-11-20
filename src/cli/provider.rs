@@ -26,16 +26,29 @@ struct Replacement {
 
 #[derive(Default, Deserialize, Hash, Serialize)]
 pub struct Fragment {
-    pub patch: BTreeMap<String, BTreeMap<String, Entry>>,
+    patch: BTreeMap<String, BTreeMap<String, Entry>>,
 }
 
 #[derive(Deserialize, Hash, Serialize)]
-pub struct Entry {
+struct Entry {
     path: PathBuf,
-    pub version: Version,
+    package: Option<String>,
+    version: Version,
 }
 
 impl Fragment {
+    pub fn targets(&self) -> impl Iterator<Item = (&str, &str, &Version)> {
+        self.patch.iter().flat_map(|(source, entries)| {
+            entries.iter().map(move |(key, entry)| {
+                (
+                    source.as_str(),
+                    entry.package.as_deref().unwrap_or(key),
+                    &entry.version,
+                )
+            })
+        })
+    }
+
     pub fn resolve(&self, config: &Path) -> Result<()> {
         let entry = self
             .patch
@@ -202,19 +215,27 @@ impl Provider {
                 format!("#![no_std]\n\n{export}"),
             ));
             let entries = config.patch.entry(source.into()).or_default();
+            let version = target
+                .version
+                .to_string()
+                .replace('.', "_")
+                .replace('+', "__");
             if entries
                 .insert(
-                    target.package.clone(),
+                    format!("{}___{version}", target.package),
                     Entry {
                         path: i.to_string().into(),
+                        package: Some(target.package.clone()),
                         version: target.version.clone(),
                     },
                 )
                 .is_some()
             {
-                return Err(
-                    format!("duplicate replacement for {} from {source}", target.package).into(),
-                );
+                return Err(format!(
+                    "duplicate replacement for {}@{} from {source}",
+                    target.package, target.version
+                )
+                .into());
             }
         }
         let mut key = DefaultHasher::new();

@@ -28,4 +28,6 @@ replaces = [{ package = "tokio", version = "1.54.1" }]
 
 Here `1.54.1` is the version that existing dependencies request as `tokio`. They can call `tokio::spawn` and enable `tokio/rt` to use the corresponding function and feature from `my-runtime`.
 
+To provide several versions of the same upstream package, add an entry to `replaces` for each version.
+
 Set `git` on an entry when the original dependency comes from a Git URL. An entry can also specify `lib` if the original package has a custom library name, or `module` if the replacement exposes that API in a particular public module.

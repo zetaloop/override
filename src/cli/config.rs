@@ -101,15 +101,13 @@ pub fn enable(provider: Provider) -> Result<()> {
             continue;
         }
         let existing = store.fragment(active)?;
-        for (source, entries) in &new.patch {
-            if let Some(package) = entries.keys().find(|key| {
-                existing
-                    .patch
-                    .get(source)
-                    .is_some_and(|entries| entries.contains_key(*key))
-            }) {
-                return Err(format!("{other} already replaces {package} from {source}").into());
-            }
+        if let Some((source, package, version)) = existing
+            .targets()
+            .find(|existing| new.targets().any(|new| new == *existing))
+        {
+            return Err(
+                format!("{other} already replaces {package}@{version} from {source}").into(),
+            );
         }
     }
     new.resolve(&store.home.join(file))?;
@@ -133,13 +131,8 @@ pub fn list() -> Result<()> {
     let store = Store::open()?;
     for file in store.providers.values() {
         let (name, version) = identity(file)?;
-        for (source, entries) in store.fragment(file)?.patch {
-            for (package, entry) in entries {
-                println!(
-                    "{name}@{version} replaces {package}@{} from {source}",
-                    entry.version
-                );
-            }
+        for (source, package, upstream) in store.fragment(file)?.targets() {
+            println!("{name}@{version} replaces {package}@{upstream} from {source}");
         }
     }
     Ok(())
