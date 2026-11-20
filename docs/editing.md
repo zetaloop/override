@@ -288,6 +288,19 @@ The signature defines the new helper, and `arguments` gives the expressions pass
 
 The helper goes next to the original function, in the same `impl` or trait if there is one. An async signature makes the call awaited.
 
+When the selected code relies on a local `use`, `extract` brings the required name into the helper. This includes traits used through method calls. If the supplied source leaves the target of `b.score()` unclear, the patch can name the method before extracting the surrounding `if`:
+
+```rust
+source.bind_method(
+    item("run").if_expr().call("score"),
+    "<api::Buf as api::Score>::score",
+)?;
+source.select(item("run").if_expr())?
+    .extract("fn base(active: bool) -> u8", &["active"])?;
+```
+
+Here the helper needs `api::Score` in scope. For the inherent method on `Buf`, the binding is `api::Buf::score`.
+
 The extracted code runs in its own function, so moves, borrows and drop order follow from the chosen signature, arguments and outputs.
 
 ### Carrying control flow
@@ -310,6 +323,8 @@ source
 A single kind of exit uses `core::ops::ControlFlow` with its value directly. Several kinds use a generated enum named after the helper, such as `ParseItemExit`, with the helper's visibility.
 
 `propagate()` keeps `?` working: the helper returns the enclosing `Result`, `Option` or `ControlFlow` type, and the call site applies `?`. Aliases and supplied declarations help determine that type.
+
+Enable the `expand` Cargo feature when extraction depends on the bindings or control flow introduced by a macro. The editor follows declarative macros in the source and the standard library: `read()?` inside `writeln!(out, "{}", read()?)` can leave the selection, while `stringify!(return 7)` produces text. If carrying an exit would require changing the macro definition or selecting a different rule, `extract` reports the call.
 
 The signature's return type is the helper's normal result. With both options in a function returning `Result`, a normal result `Output` becomes something like `Result<ControlFlow<Exit, Output>, Error>`. Exit value types come from the function's return type, the loop's type or the value's declaration.
 
@@ -370,7 +385,7 @@ Variables declared before the selection come in through parameters and arguments
 To compile that source and run the new command:
 
 ```sh
-cargo run --example edit | rustc --edition 2024 --crate-name dispatcher -
+cargo run --example edit --features expand | rustc --edition 2024 --crate-name dispatcher -
 ./dispatcher Hello 2
 ```
 

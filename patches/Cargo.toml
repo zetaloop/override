@@ -8,7 +8,6 @@ publish = false
 
 [lib]
 name = "override"
-path = "../src/lib.rs"
 
 [features]
 default = ["build"]

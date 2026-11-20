@@ -765,6 +765,14 @@ impl Selected<'_> {
             })
             .unwrap_or(false);
         let location = self.location.clone();
+        if let Some(region) = &region {
+            flow::check(
+                self.source,
+                &location,
+                region,
+                region::tail(&location.node, region),
+            )?;
+        }
         self.edit(|editor, node, edition| {
             let helper = fragment::path(helper, edition)?;
             let mut inputs = context
@@ -810,7 +818,6 @@ impl Selected<'_> {
                 );
             } else if region.is_some() || ast::Fn::can_cast(node.kind()) {
                 let contents = if let Some(region) = &region {
-                    flow::check(&location, region, region::tail(node, region))?;
                     fragment::block(region, edition)?.to_string()
                 } else {
                     ast::Fn::cast(node.clone())

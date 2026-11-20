@@ -1,10 +1,15 @@
 use ra_ap_syntax::{
-    AstNode, SyntaxElement, SyntaxKind, SyntaxNode, TextSize, ast,
+    AstNode, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextSize, ast,
     ast::{HasName, HasVisibility, make},
     syntax_editor::{Position, SyntaxEditor},
 };
 
-use crate::{Result, Selected, Source, fragment, resolve, source::Location, symbol};
+use crate::{
+    Result, Selected, Source, expand::Macros, fragment, resolve, source::Location, symbol,
+};
+
+mod imports;
+pub(crate) use imports::Imports;
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Options {
@@ -69,66 +74,191 @@ struct Jump {
     location: Location,
     target: Location,
     action: Action,
+    view: usize,
 }
 
-fn exits(location: &Location, region: &[SyntaxElement]) -> Result<(Vec<Jump>, Vec<Location>)> {
-    let mut scope = location.clone();
-    scope.region = Some(region.to_vec());
-    let range = scope.range();
-    let mut jumps = Vec::new();
-    let mut tries = Vec::new();
-    for location in scope.descendants() {
-        let node = &location.node;
-        let kind = node.kind();
-        if matches!(kind, SyntaxKind::RETURN_EXPR | SyntaxKind::TRY_EXPR) {
-            let target = location
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Edit {
+    pub token: SyntaxToken,
+    pub before: String,
+    pub value: String,
+    pub after: String,
+}
+
+impl Edit {
+    fn at(edits: &mut Vec<Self>, token: SyntaxToken) -> &mut Self {
+        if let Some(i) = edits.iter().position(|e| e.token == token) {
+            return &mut edits[i];
+        }
+        edits.push(Self {
+            value: token.text().to_owned(),
+            token,
+            before: String::new(),
+            after: String::new(),
+        });
+        edits.last_mut().unwrap()
+    }
+
+    pub fn text(&self) -> String {
+        format!("{}{}{}", self.before, self.value, self.after)
+    }
+
+    pub fn apply(text: &mut String, start: TextSize, mut edits: Vec<Self>) {
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.token.text_range().start()));
+        for edit in edits {
+            text.replace_range(
+                std::ops::Range::<usize>::from(edit.token.text_range() - start),
+                &edit.text(),
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct Exits {
+    macros: Macros,
+    jumps: Vec<Jump>,
+    tries: Vec<Location>,
+    imports: Option<Imports>,
+    definitions: Vec<Location>,
+}
+
+impl Exits {
+    fn collect(
+        source: &Source,
+        scope: &Location,
+        region: &[SyntaxElement],
+        imports: Option<Imports>,
+    ) -> Result<Self> {
+        let definitions = if imports.as_ref().is_some_and(|i| i.has_local_uses) {
+            resolve::declarations(source)
+                .into_iter()
+                .map(|(_, at)| at)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut exits = Self {
+            imports,
+            definitions,
+            ..Self::default()
+        };
+        for node in region.iter().filter_map(SyntaxElement::as_node) {
+            let at = scope.at(node.clone());
+            let mut ancestors: Vec<_> = at
                 .ancestors()
                 .into_iter()
                 .skip(1)
-                .find(|node| {
-                    matches!(node.kind(), SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR)
-                        || ast::BlockExpr::cast(node.clone()).is_some_and(|block| {
-                            block.async_token().is_some()
-                                || block.gen_token().is_some()
-                                || (kind == SyntaxKind::TRY_EXPR
-                                    && block.try_block_modifier().is_some())
+                .rev()
+                .map(|n| (0, n))
+                .collect();
+            exits.visit(source, &at, 0, node, &mut ancestors, 0)?;
+        }
+        Ok(exits)
+    }
+
+    fn visit(
+        &mut self,
+        source: &Source,
+        site: &Location,
+        view: usize,
+        node: &SyntaxNode,
+        ancestors: &mut Vec<(usize, SyntaxNode)>,
+        inside: usize,
+    ) -> Result<()> {
+        let kind = node.kind();
+        let at = site.at(node.clone());
+        if let Some(imports) = &mut self.imports
+            && !self.definitions.is_empty()
+        {
+            let bound = ast::MethodCallExpr::cast(node.clone())
+                .and_then(|call| call.name_ref())
+                .and_then(|name| {
+                    self.macros
+                        .bound(source, view, &at, name.syntax().text_range())
+                });
+            imports.visit(
+                &self.definitions,
+                &at,
+                self.macros.parents(view),
+                bound,
+                self.macros.source_range(view, node.text_range()),
+            )?;
+        }
+        if let Some(call) = ast::MacroCall::cast(node.clone()) {
+            if node.parent().is_some_and(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::MACRO_PAT
+                        | SyntaxKind::MACRO_TYPE
+                        | SyntaxKind::ITEM_LIST
+                        | SyntaxKind::ASSOC_ITEM_LIST
+                )
+            }) {
+                return Ok(());
+            }
+            let (expanded, root) =
+                self.macros
+                    .expand(source, view, &at, &call, self.imports.as_mut())?;
+            return self.visit(source, &at, expanded, &root, ancestors, inside);
+        }
+        if self.imports.is_none()
+            && (ast::Item::can_cast(kind)
+                || kind == SyntaxKind::CLOSURE_EXPR
+                || ast::BlockExpr::cast(node.clone()).is_some_and(|b| {
+                    b.async_token().is_some()
+                        || b.gen_token().is_some()
+                        || b.const_token().is_some()
+                }))
+        {
+            return Ok(());
+        }
+        let outer = ancestors.len() - inside;
+        if matches!(kind, SyntaxKind::RETURN_EXPR | SyntaxKind::TRY_EXPR) {
+            let (index, (_, target)) = ancestors
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, (_, n))| {
+                    matches!(n.kind(), SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR)
+                        || ast::BlockExpr::cast(n.clone()).is_some_and(|b| {
+                            b.async_token().is_some()
+                                || b.gen_token().is_some()
+                                || kind == SyntaxKind::TRY_EXPR && b.try_block_modifier().is_some()
                         })
                 })
                 .ok_or("exit has no enclosing return context")?;
-            let target = location.at(target);
-            if range.contains_range(target.range()) {
-                continue;
-            }
-            if kind == SyntaxKind::TRY_EXPR {
-                if !tries
-                    .iter()
-                    .any(|existing: &Location| existing.same(&target))
-                {
-                    tries.push(target);
+            if index < outer {
+                let target = site.at(target.clone());
+                if kind == SyntaxKind::TRY_EXPR {
+                    if !self.tries.iter().any(|t| t.same(&target)) {
+                        self.tries.push(target);
+                    }
+                } else {
+                    self.jumps.push(Jump {
+                        location: at.clone(),
+                        target,
+                        action: Action::Return,
+                        view,
+                    });
                 }
-            } else {
-                jumps.push(Jump {
-                    location,
-                    target,
-                    action: Action::Return,
-                });
             }
         } else if matches!(kind, SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR) {
             let label = node
                 .children()
                 .find_map(ast::Lifetime::cast)
                 .map(|label| label.to_string());
-            let target = location
-                .ancestors()
-                .into_iter()
-                .skip(1)
-                .take_while(|node| {
+            let (index, (_, target)) = ancestors
+                .iter()
+                .enumerate()
+                .rev()
+                .take_while(|(_, (_, node))| {
                     !matches!(node.kind(), SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR)
                         && !ast::BlockExpr::cast(node.clone()).is_some_and(|block| {
                             block.async_token().is_some() || block.gen_token().is_some()
                         })
                 })
-                .find(|node| {
+                .find(|(_, (_, node))| {
                     if let Some(label) = &label {
                         node.children()
                             .find_map(ast::Label::cast)
@@ -143,36 +273,45 @@ fn exits(location: &Location, region: &[SyntaxElement]) -> Result<(Vec<Jump>, Ve
                     }
                 })
                 .ok_or("loop exit has no enclosing destination")?;
-            let target = location.at(target);
-            if range.contains_range(target.range()) {
-                continue;
+            if index < outer {
+                let action = if kind == SyntaxKind::BREAK_EXPR {
+                    Action::Break(label)
+                } else {
+                    Action::Continue(label)
+                };
+                self.jumps.push(Jump {
+                    location: at.clone(),
+                    target: site.at(target.clone()),
+                    action,
+                    view,
+                });
             }
-            let action = if kind == SyntaxKind::BREAK_EXPR {
-                Action::Break(label)
-            } else {
-                Action::Continue(label)
-            };
-            jumps.push(Jump {
-                location,
-                target,
-                action,
-            });
         }
+        ancestors.push((view, node.clone()));
+        for child in node.children() {
+            self.visit(source, site, view, &child, ancestors, inside + 1)?;
+        }
+        ancestors.pop();
+        Ok(())
     }
-    Ok((jumps, tries))
 }
 
-pub(crate) fn check(location: &Location, region: &[SyntaxElement], tail: bool) -> Result<()> {
-    let (jumps, tries) = exits(location, region)?;
-    if jumps
-        .iter()
-        .any(|jump| !matches!(jump.action, Action::Return) || !tail)
-    {
+pub(crate) fn check(
+    source: &Source,
+    location: &Location,
+    region: &[SyntaxElement],
+    tail: bool,
+) -> Result<()> {
+    if tail {
+        return Ok(());
+    }
+    let Exits { jumps, tries, .. } = Exits::collect(source, location, region, None)?;
+    if !jumps.is_empty() {
         return Err(
             "control flow leaves the selected region; enable control_flow for extraction".into(),
         );
     }
-    if !tries.is_empty() && !tail {
+    if !tries.is_empty() {
         return Err("? leaves the selected region; enable propagate for extraction".into());
     }
     Ok(())
@@ -240,6 +379,28 @@ pub(crate) fn extract(
     options: Options,
 ) -> Result<Transformed> {
     let edition = source.edition();
+    if tail
+        && options == Options::default()
+        && let Some(body) = location
+            .ancestors()
+            .into_iter()
+            .find_map(ast::Fn::cast)
+            .and_then(|f| f.body())
+            .and_then(|b| b.stmt_list())
+        && body
+            .syntax()
+            .children()
+            .eq(region.iter().filter_map(SyntaxElement::as_node).cloned())
+    {
+        // The helper returns directly to the caller and takes the entire local scope with it.
+        return Ok(Transformed {
+            body: fragment::block(region, edition)?,
+            call,
+            binding: None,
+            return_type: None,
+            declaration: None,
+        });
+    }
     let tail = tail && options.outputs.is_empty();
     let mut scope = location.clone();
     scope.region = Some(region.to_vec());
@@ -270,7 +431,18 @@ pub(crate) fn extract(
             bindings.push((name.text().to_owned(), binding.into()));
         }
     }
-    let (jumps, tries) = exits(location, region)?;
+    let Exits {
+        macros,
+        jumps,
+        tries,
+        imports,
+        ..
+    } = Exits::collect(
+        source,
+        location,
+        region,
+        Some(Imports::new(source, &scope)?),
+    )?;
     let container = if !tries.is_empty() && options.propagate {
         let [target] = tries.as_slice() else {
             return Err("selected region has several external return contexts".into());
@@ -294,7 +466,6 @@ pub(crate) fn extract(
     }
     let mut exits: Vec<Exit> = Vec::new();
     let mut edits = Vec::new();
-    let origin = scope.range().start();
     let prefix = if region.first().is_some_and(|element| {
         element.kind() == SyntaxKind::WHITESPACE && element.to_string().contains('\n')
     }) {
@@ -366,23 +537,9 @@ pub(crate) fn extract(
                 });
                 exits.len() - 1
             };
-            edits.push((
-                jump.location.range().start() - origin
-                    + TextSize::of(prefix.as_str())
-                    + TextSize::from(1),
-                jump.location.node.kind(),
-                index,
-            ));
+            edits.push((jump, index));
         }
     }
-    let contents = region.iter().map(ToString::to_string).collect::<String>();
-    let body = fragment::expression(&format!("{{{prefix}{contents}}}"), edition)?;
-    let mut body_source = Source {
-        root: body.syntax().clone(),
-        edition,
-        module: String::new(),
-        modules: Vec::new(),
-    };
     let name = format!(
         "{}Exit",
         camel(
@@ -426,52 +583,87 @@ pub(crate) fn extract(
     } else {
         None
     };
-    edits.sort_by_key(|(offset, _, _)| std::cmp::Reverse(*offset));
-    for (offset, kind, index) in edits {
-        let root = Location::root(body_source.root.clone(), edition);
-        let location = root
-            .descendants()
-            .into_iter()
-            .find(|location| location.range().start() == offset && location.node.kind() == kind)
-            .ok_or("control-flow expression is missing during extraction")?;
-        let exit = &exits[index];
-        Selected {
-            source: &mut body_source,
-            location,
-            flow: Options::default(),
-            position: None,
+    let mut views = vec![Vec::new()];
+    for (jump, index) in edits {
+        if views.len() <= jump.view {
+            views.resize_with(jump.view + 1, Vec::new);
         }
-        .edit(|editor, node, edition| {
-            let value = ast::ReturnExpr::cast(node.clone())
-                .and_then(|expression| expression.expr())
-                .or_else(|| {
-                    ast::BreakExpr::cast(node.clone()).and_then(|expression| expression.expr())
-                })
-                .map(|expression| expression.to_string())
-                .unwrap_or_else(|| "()".to_owned());
-            let value = if declaration.is_some() {
-                let variant = format!("{name}::{}", exit.action.name());
-                if exit.ty.is_some() {
-                    format!("{variant}({value})")
-                } else {
-                    variant
-                }
+        let edits = &mut views[jump.view];
+        let exit = &exits[index];
+        let node = &jump.location.node;
+        let keyword = node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| {
+                matches!(
+                    t.kind(),
+                    ra_ap_syntax::T![return] | ra_ap_syntax::T![break] | ra_ap_syntax::T![continue]
+                )
+            })
+            .ok_or("control-flow expression has no keyword")?;
+        let operand = node.children().find_map(ast::Expr::cast);
+        let variant = if declaration.is_some() {
+            let variant = format!("{name}::{}", exit.action.name());
+            if exit.ty.is_some() {
+                format!("{variant}(#)")
             } else {
-                value
-            };
-            let value = format!("::core::ops::ControlFlow::Break({value})");
-            let value = container
-                .as_ref()
-                .map_or_else(|| value.clone(), |container| container.wrap(&value));
-            editor.replace(
-                node,
-                fragment::expression(&format!("return {value}"), edition)?.syntax(),
-            );
-            Ok(())
-        })?;
+                variant
+            }
+        } else {
+            "#".to_owned()
+        };
+        let wrapped = format!("::core::ops::ControlFlow::Break({variant})");
+        let wrapped = container
+            .as_ref()
+            .map_or_else(|| wrapped.clone(), |container| container.wrap(&wrapped));
+        if let Some(label) = node.children().find_map(ast::Lifetime::cast) {
+            for token in label
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+            {
+                Edit::at(edits, token).value.clear();
+            }
+        }
+        if let Some(operand) = operand {
+            if keyword.kind() != ra_ap_syntax::T![return] {
+                Edit::at(edits, keyword).value = "return".to_owned();
+            }
+            let (open, close) = wrapped
+                .split_once('#')
+                .ok_or("exit variant has no value slot")?;
+            let first = operand
+                .syntax()
+                .first_token()
+                .ok_or("exit value has no tokens")?;
+            let last = operand
+                .syntax()
+                .last_token()
+                .ok_or("exit value has no tokens")?;
+            Edit::at(edits, first).before.push_str(open);
+            Edit::at(edits, last).after.insert_str(0, close);
+        } else {
+            Edit::at(edits, keyword).value = format!("return {}", wrapped.replace('#', "()"));
+        }
     }
-    let elements = body_source
-        .root
+    let mut contents = region.iter().map(ToString::to_string).collect::<String>();
+    Edit::apply(
+        &mut contents,
+        region
+            .first()
+            .ok_or("empty extraction region")?
+            .text_range()
+            .start(),
+        macros.project(views)?,
+    );
+    let uses = imports
+        .into_iter()
+        .flat_map(|i| i.uses)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = fragment::expression(&format!("{{{uses}{prefix}{contents}}}"), edition)?;
+    let elements = body
+        .syntax()
         .children()
         .find_map(ast::StmtList::cast)
         .ok_or("extracted body has no statements")?
@@ -480,14 +672,14 @@ pub(crate) fn extract(
         .skip(1)
         .take_while(|element| element.kind() != ra_ap_syntax::T!['}'])
         .collect::<Vec<_>>();
-    body_source.root = fragment::block(&elements, edition)?.syntax().clone();
+    let mut body = fragment::block(&elements, edition)?;
     let mut output = signature
         .ret_type()
         .and_then(|ret| ret.ty())
         .map(|ty| ty.to_string())
         .unwrap_or_else(|| "()".to_owned());
     let block =
-        ast::BlockExpr::cast(body_source.root.clone()).ok_or("extracted body is not a block")?;
+        ast::BlockExpr::cast(body.syntax().clone()).ok_or("extracted body is not a block")?;
     let list = block
         .stmt_list()
         .ok_or("extracted body has no statements")?;
@@ -565,7 +757,7 @@ pub(crate) fn extract(
     }
     let transformed = !exits.is_empty() || container.is_some();
     if (transformed || !bindings.is_empty()) && !diverges(block.syntax()) {
-        let (editor, _) = SyntaxEditor::new(body_source.root.clone());
+        let (editor, _) = SyntaxEditor::new(body.syntax().clone());
         let value = fragment::expression(&value, edition)?;
         let value = fragment::indent(value.syntax(), "    ");
         if let Some(tail) = list.tail_expr()
@@ -594,7 +786,8 @@ pub(crate) fn extract(
                 ],
             );
         }
-        body_source.root = editor.finish().new_root().clone();
+        body = ast::Expr::cast(editor.finish().new_root().clone())
+            .ok_or("extracted body is not an expression")?;
     }
     let binding = if bindings.is_empty() {
         None
@@ -612,7 +805,6 @@ pub(crate) fn extract(
             _ => make::tuple_pat(bindings.into_iter().map(|(_, binding)| binding)).into(),
         })
     };
-    let body = ast::Expr::cast(body_source.root).ok_or("extracted body is not an expression")?;
     Ok(Transformed {
         body,
         call: fragment::expression(&call, edition)?,

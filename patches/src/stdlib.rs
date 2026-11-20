@@ -71,6 +71,13 @@ fn declarations(items: impl Iterator<Item = ast::Item>) -> Result<String> {
     for item in items {
         let node = item.syntax();
         let text = match &item {
+            ast::Item::Use(import)
+                if import
+                    .attrs()
+                    .any(|attr| attr.simple_name().as_deref() == Some("prelude_import")) =>
+            {
+                continue;
+            }
             ast::Item::MacroRules(_)
             | ast::Item::MacroDef(_)
             | ast::Item::Use(_)
