@@ -14,6 +14,10 @@ fn main() -> Result<()> {
     let mbe = patches.dependency("ra_ap_mbe")?;
     let packages = [
         ("override-lexer", syntax.dependency("ra-ap-rustc_lexer")?),
+        (
+            "override-format",
+            patches.dependency("ra-ap-rustc_parse_format")?,
+        ),
         ("override-parser", syntax.dependency("parser")?),
         ("override-syntax", syntax),
         ("override-span", mbe.dependency("span")?),

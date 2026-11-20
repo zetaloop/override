@@ -387,6 +387,7 @@ dependencies = [
  "cargo-config2",
  "cargo_metadata",
  "flate2",
+ "ra-ap-rustc_parse_format",
  "ra_ap_mbe",
  "ra_ap_syntax",
  "serde_json",
@@ -458,6 +459,16 @@ dependencies = [
  "memchr",
  "unicode-ident",
  "unicode-properties",
+]
+
+[[package]]
+name = "ra-ap-rustc_parse_format"
+version = "0.180.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8f21397e1ecc0000f64676db19adc5d78c465d48ccea82175e587d77ad988c3"
+dependencies = [
+ "ra-ap-rustc_lexer",
+ "rustc-literal-escaper",
 ]
 
 [[package]]
