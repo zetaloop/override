@@ -11,12 +11,14 @@ fn main() -> Result<()> {
     let patches = Package::load(env!("CARGO_MANIFEST_PATH"))?;
     let version = env!("CARGO_PKG_VERSION");
     let syntax = patches.dependency("ra_ap_syntax")?;
-    let mbe = patches.dependency("ra_ap_mbe")?;
+    let hir = patches.dependency("ra_ap_hir_def")?;
+    let expand = hir.dependency("hir-expand")?;
+    let mbe = expand.dependency("mbe")?;
     let packages = [
         ("override-lexer", syntax.dependency("ra-ap-rustc_lexer")?),
         (
             "override-format",
-            patches.dependency("ra-ap-rustc_parse_format")?,
+            hir.dependency("ra-ap-rustc_parse_format")?,
         ),
         ("override-parser", syntax.dependency("parser")?),
         ("override-syntax", syntax),
@@ -24,6 +26,10 @@ fn main() -> Result<()> {
         ("override-tt", mbe.dependency("tt")?),
         ("override-syntax-bridge", mbe.dependency("syntax-bridge")?),
         ("override-mbe", mbe),
+        ("override-cfg", hir.dependency("cfg")?),
+        ("override-base-db", hir.dependency("base-db")?),
+        ("override-hir-expand", expand),
+        ("override-hir-def", hir),
     ];
 
     for &(name, ref upstream) in &packages {

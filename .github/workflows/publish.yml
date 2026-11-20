@@ -49,7 +49,7 @@ jobs:
         run: |
           version=$(cargo +stable metadata --manifest-path patches/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[0].version')
           missing=()
-          for crate in override-lexer override-format override-parser override-syntax override-span override-tt override-syntax-bridge override-mbe; do
+          for crate in override-lexer override-format override-parser override-syntax override-span override-tt override-syntax-bridge override-mbe override-cfg override-base-db override-hir-expand override-hir-def; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' -A "$USER_AGENT" "https://crates.io/api/v1/crates/$crate/$version")
             case "$code" in
               200) echo "$crate $version already published" ;;
