@@ -457,23 +457,13 @@ impl Selected<'_> {
     }
 
     pub fn set_value(self, value: &str) -> Result<()> {
-        let argument = self.location.argument;
         self.edit(|editor, node, edition| {
             let expression = fragment::expression(value, edition)?;
-            let expression = if argument
-                && node
-                    .parent()
-                    .is_some_and(|parent| expression.needs_parens_in_place_of(&parent, node))
-            {
-                make::expr_paren(expression).into()
-            } else {
-                expression
-            };
-            let expression = fragment::indent(expression.syntax(), &fragment::indentation(node));
-            if argument {
-                editor.replace(node, &expression);
+            if ast::Expr::can_cast(node.kind()) {
+                replace_expression(editor, node, expression);
                 return Ok(());
             }
+            let expression = fragment::indent(expression.syntax(), &fragment::indentation(node));
             if let Some(field) = ast::RecordExprField::cast(node.clone()) {
                 let old = field.expr().ok_or("field has no value")?;
                 if field.colon_token().is_some() {
@@ -549,9 +539,10 @@ impl Selected<'_> {
                 .or_else(|| ast::WhileExpr::cast(node.clone()).and_then(|node| node.condition()))
                 .or_else(|| ast::ForExpr::cast(node.clone()).and_then(|node| node.iterable()))
                 .ok_or("selected object has no condition")?;
-            editor.replace(
+            replace_expression(
+                editor,
                 old.syntax(),
-                fragment::expression(condition, edition)?.syntax(),
+                fragment::expression(condition, edition)?,
             );
             Ok(())
         })
@@ -1151,6 +1142,21 @@ fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {
         .parent()
         .filter(|node| ast::Use::can_cast(node.kind()))
         .ok_or_else(|| "import has no declaration".into())
+}
+
+fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast::Expr) {
+    let expression = if node
+        .parent()
+        .is_some_and(|parent| expression.needs_parens_in_place_of(&parent, node))
+    {
+        make::expr_paren(expression).into()
+    } else {
+        expression
+    };
+    editor.replace(
+        node,
+        fragment::indent(expression.syntax(), &fragment::indentation(node)),
+    );
 }
 
 fn remove_node(editor: &SyntaxEditor, node: &SyntaxNode) {

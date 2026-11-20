@@ -183,7 +183,7 @@ source.select(item("LIMIT"))?.set_value("64")?;
 source.select(item("run").while_loop())?.set_condition("self.ready()")?;
 ```
 
-`set_value` works on record-field initializers, constants, statics, enum discriminants and named call arguments. `set_condition` replaces the condition of an `if` or `while`, or the iterable of a `for`.
+`set_value` replaces a selected expression, or the value of a record field initializer, constant, static or enum discriminant. Selecting a condition with `condition()` and replacing it with `set_value` has the same effect as `set_condition` on the enclosing `if`, `while` or `for`.
 
 To let a destructuring pattern accept other fields, add `..`:
 
