@@ -2,7 +2,9 @@ use std::path::Path;
 
 use ra_ap_syntax::{
     AstNode, SyntaxElement, SyntaxKind, SyntaxNode, T,
-    ast::{self, HasGenericArgs, HasName, HasVisibility, edit::AstNodeEdit, make},
+    ast::{
+        self, HasGenericArgs, HasGenericParams, HasName, HasVisibility, edit::AstNodeEdit, make,
+    },
     syntax_editor::{Position, Removable, SyntaxEditor},
 };
 
@@ -130,17 +132,61 @@ impl Selected<'_> {
     pub fn add_field(mut self, declaration: &str) -> Result<()> {
         let position = self.insertion()?;
         self.edit(|editor, node, edition| {
-            let list = node
-                .children()
-                .find(|node| {
-                    matches!(
-                        node.kind(),
-                        SyntaxKind::RECORD_FIELD_LIST
-                            | SyntaxKind::TUPLE_FIELD_LIST
-                            | SyntaxKind::RECORD_EXPR_FIELD_LIST
-                    )
-                })
-                .ok_or("selected object has no field list")?;
+            let list = node.children().find(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::RECORD_FIELD_LIST
+                        | SyntaxKind::TUPLE_FIELD_LIST
+                        | SyntaxKind::RECORD_EXPR_FIELD_LIST
+                )
+            });
+            let Some(list) = list else {
+                if !matches!(node.kind(), SyntaxKind::STRUCT | SyntaxKind::VARIANT) {
+                    return Err("selected object has no field list".into());
+                }
+                if let Some(position) = &position {
+                    insertion(node, position)?;
+                }
+                let fields = if let Ok(parsed) =
+                    fragment::file(&format!("struct S({declaration});"), edition)
+                {
+                    fragment::one::<ast::TupleField>(&parsed)?;
+                    fragment::one::<ast::TupleFieldList>(&parsed)?
+                        .syntax()
+                        .clone()
+                } else {
+                    let parsed = fragment::file(&format!("struct S {{ {declaration} }}"), edition)?;
+                    fragment::one::<ast::RecordField>(&parsed)?;
+                    fragment::one::<ast::RecordFieldList>(&parsed)?
+                        .syntax()
+                        .clone()
+                };
+                let record = ast::RecordFieldList::can_cast(fields.kind());
+                if record
+                    && let Some(semi) =
+                        ast::Struct::cast(node.clone()).and_then(|s| s.semicolon_token())
+                {
+                    editor.replace_with_many(semi, vec![whitespace(" "), fields.into()]);
+                } else {
+                    let anchor = node
+                        .children()
+                        .find_map(ast::GenericParamList::cast)
+                        .map(|l| l.syntax().clone())
+                        .or_else(|| {
+                            node.children()
+                                .find_map(ast::Name::cast)
+                                .map(|n| n.syntax().clone())
+                        })
+                        .ok_or("declaration has no name")?;
+                    let position = Position::after(anchor);
+                    if record {
+                        editor.insert_all(position, vec![whitespace(" "), fields.into()]);
+                    } else {
+                        editor.insert(position, fields);
+                    }
+                }
+                return Ok(());
+            };
             let field = match list.kind() {
                 SyntaxKind::RECORD_FIELD_LIST => {
                     let parsed = fragment::file(&format!("struct S {{ {declaration} }}"), edition)?;
@@ -272,6 +318,8 @@ impl Selected<'_> {
     pub fn add_generic(mut self, declaration: &str) -> Result<()> {
         let position = self.insertion()?;
         self.edit(|editor, node, edition| {
+            let owner = ast::AnyHasGenericParams::cast(node.clone())
+                .ok_or("selected declaration cannot have generic parameters")?;
             let function = fragment::signature(&format!("fn f<{declaration}>()"), edition)?;
             let list = function
                 .syntax()
@@ -282,7 +330,7 @@ impl Selected<'_> {
             let [parameter] = parameters.as_slice() else {
                 return Err("expected one generic parameter".into());
             };
-            if let Some(existing) = node.children().find_map(ast::GenericParamList::cast) {
+            if let Some(existing) = owner.generic_param_list() {
                 append(
                     editor,
                     existing.syntax(),
@@ -290,14 +338,20 @@ impl Selected<'_> {
                     position.as_ref(),
                 )
             } else {
-                let name = node
-                    .children()
-                    .find_map(ast::Name::cast)
-                    .ok_or("selected object has no name")?;
+                let anchor = if let Some(implementation) = ast::Impl::cast(node.clone()) {
+                    Position::after(implementation.impl_token().ok_or("missing impl keyword")?)
+                } else {
+                    Position::after(
+                        node.children()
+                            .find_map(ast::Name::cast)
+                            .ok_or("selected declaration has no name")?
+                            .syntax(),
+                    )
+                };
                 if let Some(position) = &position {
                     insertion(node, position)?;
                 }
-                editor.insert(Position::after(name.syntax()), list.syntax());
+                editor.insert(anchor, list.syntax());
                 Ok(())
             }
         })

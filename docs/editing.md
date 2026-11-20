@@ -160,7 +160,7 @@ source.select(item("run"))?.add_attribute("#[inline]")?;
 | `set_binding("mut value")` | Changes a selected named binding's pattern, including its `mut`, `ref` or `@` modifiers |
 | `set_visibility("pub(crate)")` | Changes declaration visibility; `""` selects private visibility |
 | `add_attribute("#[inline]")` | Adds an attribute before the declaration header |
-| `add_field("field: Type")` | Adds a declaration field; on a record expression, accepts an initializer such as `"field: value"` |
+| `add_field("field: Type")` | Adds a named field, or a tuple field when given just its type. On a unit struct or variant, the first field determines the form. On a record expression, accepts an initializer such as `"field: value"` |
 | `add_variant("Repeat { count: usize }")` | Adds an enum variant |
 | `add_parameter("context: &Context")` | Adds a function or closure parameter |
 | `add_generic("T: Send")` | Adds a generic parameter |
