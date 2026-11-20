@@ -15,10 +15,166 @@ pub(crate) enum Namespace {
 }
 
 #[derive(Clone)]
-struct Binding {
+pub(crate) struct Binding {
+    pub declaration: Location,
+    pub unresolved: Option<String>,
+    pub imports: Vec<Import>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Import {
+    pub leaf: Location,
+    pub name: String,
     declaration: Location,
     unresolved: Option<String>,
-    imports: Vec<(Location, Location, Option<String>)>,
+}
+
+impl Binding {
+    pub fn same_target(&self, other: &Self) -> bool {
+        match (&self.unresolved, &other.unresolved) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => same(&self.declaration, &other.declaration),
+            _ => false,
+        }
+    }
+
+    fn imported(mut self, leaf: &Location, name: &str) -> Self {
+        self.imports.push(Import {
+            leaf: leaf.clone(),
+            name: name.to_owned(),
+            declaration: self.declaration.clone(),
+            unresolved: self.unresolved.clone(),
+        });
+        self
+    }
+}
+
+pub(crate) fn in_scope_trait(
+    definitions: &[Location],
+    at: &Location,
+    target: &Binding,
+    name: &str,
+) -> Option<Binding> {
+    let lookup_type = |at: &Location, name: &str| {
+        lookup(
+            definitions,
+            at,
+            name,
+            Some(Namespace::Type),
+            &mut HashSet::new(),
+        )
+    };
+    let named = |name: &str| {
+        let mut bindings = lookup_type(at, name);
+        (bindings.len() == 1 && bindings[0].same_target(target)).then(|| bindings.remove(0))
+    };
+    if let Some(binding) = named(name) {
+        return Some(binding);
+    }
+    for scope in scopes(at) {
+        for import in scope.node.children().filter_map(ast::Use::cast) {
+            let tree = import.use_tree()?;
+            for leaf in tree.syntax().descendants().filter_map(ast::UseTree::cast) {
+                let Some(rename) = leaf.rename() else {
+                    continue;
+                };
+                if let Some(alias) = rename.name() {
+                    if let Some(binding) = named(alias.text()) {
+                        return Some(binding);
+                    }
+                } else if rename.underscore_token().is_some() {
+                    let leaf_at = scope.at(leaf.syntax().clone());
+                    let mut bindings = lookup_type(&leaf_at, &resolve::import_path(&leaf));
+                    if bindings.len() == 1 && bindings[0].same_target(target) {
+                        return Some(bindings.remove(0).imported(&leaf_at, "_"));
+                    }
+                }
+            }
+        }
+        if scope.node.kind() != SyntaxKind::STMT_LIST {
+            break;
+        }
+    }
+    None
+}
+
+pub(crate) fn method_import(
+    definitions: &[Location],
+    at: &Location,
+    method: &str,
+    lost: impl Fn(&Location) -> bool,
+    destination: &Location,
+) -> Option<String> {
+    let has_method = |node: &SyntaxNode| {
+        node.children()
+            .find_map(ast::AssocItemList::cast)
+            .is_some_and(|list| {
+                list.syntax().children().filter_map(ast::Fn::cast).any(|f| {
+                    f.name()
+                        .is_some_and(|n| resolve::ident(n.text()) == resolve::ident(method))
+                        && f.param_list().is_some_and(|p| p.self_param().is_some())
+                })
+            })
+    };
+    for scope in scopes(at) {
+        for tree in scope
+            .node
+            .children()
+            .filter_map(ast::Use::cast)
+            .filter_map(|u| u.use_tree())
+        {
+            for leaf in tree
+                .syntax()
+                .descendants()
+                .filter_map(ast::UseTree::cast)
+                .filter(|t| t.use_tree_list().is_none())
+            {
+                let site = scope.at(leaf.syntax().clone());
+                if !lost(&site) {
+                    continue;
+                }
+                let path = resolve::import_path(&leaf);
+                let targets = lookup(
+                    definitions,
+                    &site,
+                    &path,
+                    Some(Namespace::Type),
+                    &mut HashSet::new(),
+                );
+                let glob = leaf.star_token().is_some();
+                for target in targets {
+                    if glob && target.unresolved.is_none() {
+                        for tr in definitions
+                            .iter()
+                            .filter(|d| d.node.kind() == SyntaxKind::TRAIT && has_method(&d.node))
+                        {
+                            let name = name(&tr.node)?;
+                            if let Some(b) =
+                                in_scope_trait(definitions, at, &tr.clone().into(), &name)
+                                && b.imports.iter().any(|i| lost(&i.leaf))
+                                && in_scope_trait(definitions, destination, &b, &name).is_none()
+                            {
+                                return Some(format!("{path}::{name}"));
+                            }
+                        }
+                    } else if target.unresolved.is_some()
+                        || target.declaration.node.kind() == SyntaxKind::TRAIT
+                            && has_method(&target.declaration.node)
+                    {
+                        let name = path.rsplit("::").next()?;
+                        if glob || in_scope_trait(definitions, destination, &target, name).is_none()
+                        {
+                            return Some(if glob { format!("{path}::*") } else { path });
+                        }
+                    }
+                }
+            }
+        }
+        if scope.node.kind() != SyntaxKind::STMT_LIST {
+            break;
+        }
+    }
+    None
 }
 
 impl From<Location> for Binding {
@@ -66,17 +222,28 @@ fn belongs(node: &SyntaxNode, namespace: Option<Namespace>) -> bool {
 }
 
 fn name(node: &SyntaxNode) -> Option<String> {
+    if let Some(ext) = ast::ExternCrate::cast(node.clone()) {
+        return ext
+            .rename()
+            .and_then(|r| r.name())
+            .map(|n| n.text().to_owned())
+            .or_else(|| ext.name_ref().map(|n| n.text().to_owned()));
+    }
     node.children()
         .find_map(ast::Name::cast)
         .map(|name| name.text().to_owned())
 }
 
 fn full(location: &Location) -> String {
-    [location.module.clone(), resolve::qualified(location)]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("::")
+    [
+        location.krate.clone(),
+        location.module.clone(),
+        resolve::qualified(location),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("::")
 }
 
 fn scopes(location: &Location) -> Vec<Location> {
@@ -108,7 +275,7 @@ fn textual(context: &Location, expected: &str) -> Vec<Binding> {
         let declarations = scope.node.children().filter_map(|node| {
             let rules = ast::MacroRules::cast(node.clone())?;
             let location = scope.at(node);
-            (rules.name()?.text() == expected
+            (resolve::ident(rules.name()?.text()) == resolve::ident(expected)
                 && (whole || location.range().end() <= context.range().start()))
             .then(|| Binding::from(location))
         });
@@ -184,14 +351,7 @@ fn same(left: &Location, right: &Location) -> bool {
 fn unique(bindings: Vec<Binding>) -> Vec<Binding> {
     let mut output: Vec<Binding> = Vec::new();
     for binding in bindings {
-        if !output
-            .iter()
-            .any(|other| match (&other.unresolved, &binding.unresolved) {
-                (Some(left), Some(right)) => left == right,
-                (None, None) => same(&other.declaration, &binding.declaration),
-                _ => false,
-            })
-        {
+        if !output.iter().any(|other| other.same_target(&binding)) {
             output.push(binding);
         }
     }
@@ -217,7 +377,8 @@ pub(crate) fn locals(
                 .flat_map(|list| list.generic_params())
             {
                 if belongs(parameter.syntax(), namespace)
-                    && name(parameter.syntax()).as_deref() == Some(expected)
+                    && name(parameter.syntax()).as_deref().map(resolve::ident)
+                        == Some(resolve::ident(expected))
                 {
                     return Some((context.at(parameter.syntax().clone()), node));
                 }
@@ -324,7 +485,11 @@ pub(crate) fn locals(
                     .syntax()
                     .descendants()
                     .filter_map(ast::IdentPat::cast)
-                    .find(|binding| binding.name().is_some_and(|name| name.text() == expected))
+                    .find(|binding| {
+                        binding.name().is_some_and(|name| {
+                            resolve::ident(name.text()) == resolve::ident(expected)
+                        })
+                    })
                 {
                     return Some((context.at(binding.syntax().clone()), node));
                 }
@@ -338,7 +503,29 @@ pub(crate) fn locals(
     None
 }
 
-fn lookup(
+pub(crate) fn scoped<'a>(
+    definitions: &[Location],
+    mut at: &'a Location,
+    mut parents: impl Iterator<Item = &'a Location>,
+    name: &str,
+    namespace: Namespace,
+) -> (Vec<Binding>, &'a Location) {
+    loop {
+        let bindings = lookup(definitions, at, name, Some(namespace), &mut HashSet::new());
+        if bindings
+            .iter()
+            .any(|b| b.unresolved.is_none() || !b.imports.is_empty())
+        {
+            return (bindings, at);
+        }
+        let Some(parent) = parents.next() else {
+            return (bindings, at);
+        };
+        at = parent;
+    }
+}
+
+pub(crate) fn lookup(
     definitions: &[Location],
     context: &Location,
     text: &str,
@@ -386,7 +573,7 @@ fn path_lookup(
     unique(result)
 }
 
-fn global(
+pub(crate) fn global(
     definitions: &[Location],
     context: &Location,
     text: &str,
@@ -397,8 +584,12 @@ fn global(
         .iter()
         .filter(|location| {
             if let Some(rules) = ast::MacroRules::cast(location.node.clone()) {
+                let (owner, member) = text.rsplit_once("::").unwrap_or(("", text));
                 return location.parents.is_empty()
-                    && rules.name().is_some_and(|name| name.text() == text)
+                    && owner == location.krate
+                    && rules
+                        .name()
+                        .is_some_and(|name| resolve::ident(name.text()) == resolve::ident(member))
                     && exported(&rules);
             }
             (ast::Item::can_cast(location.node.kind())
@@ -418,7 +609,7 @@ fn global(
     for root in definitions.iter().filter(|location| {
         (location.node.kind() == SyntaxKind::SOURCE_FILE
             && location.parents.is_empty()
-            && location.module == module)
+            && full(location) == module)
             || (location.node.kind() == SyntaxKind::MODULE
                 && full(location) == module
                 && ast::Module::cast(location.node.clone())
@@ -428,13 +619,11 @@ fn global(
         let node = ast::Module::cast(root.node.clone())
             .and_then(|module| module.item_list())
             .map_or_else(|| root.node.clone(), |list| list.syntax().clone());
-        result.extend(path_lookup(
-            definitions,
-            &root.at(node),
-            member,
-            namespace,
-            visited,
-        ));
+        result.extend(
+            path_lookup(definitions, &root.at(node), member, namespace, visited)
+                .into_iter()
+                .filter(|b| b.unresolved.is_none() || !b.imports.is_empty()),
+        );
     }
     if !found {
         result.push(Binding {
@@ -458,24 +647,36 @@ fn lookup_inner(
         || text.starts_with("self::")
         || text.starts_with("super::")
     {
-        return global(
-            definitions,
-            context,
-            &resolve::absolute(text, &resolve::module_path(context)),
-            namespace,
-            visited,
-        );
+        let path = resolve::absolute(text, &resolve::module_path(context));
+        let path = if context.krate.is_empty() || text.starts_with("::") {
+            path
+        } else {
+            format!("{}::{path}", context.krate)
+        };
+        return global(definitions, context, &path, namespace, visited);
     }
     if let Some((head, tail)) = text.split_once("::") {
         let mut result = Vec::new();
         for owner in lookup(definitions, context, head, Some(Namespace::Type), visited) {
-            let wanted = format!(
-                "{}::{tail}",
+            let name = if let Some(ext) = ast::ExternCrate::cast(owner.declaration.node.clone())
+                && let Some(name) = ext.name_ref()
+            {
+                if name.text() == "self" {
+                    owner.declaration.krate.clone()
+                } else {
+                    name.text().to_owned()
+                }
+            } else {
                 owner
                     .unresolved
                     .clone()
                     .unwrap_or_else(|| full(&owner.declaration))
-            );
+            };
+            let wanted = if name.is_empty() {
+                tail.to_owned()
+            } else {
+                format!("{name}::{tail}")
+            };
             for mut binding in global(definitions, context, &wanted, namespace, visited) {
                 binding.imports.extend(owner.imports.clone());
                 result.push(binding);
@@ -535,12 +736,13 @@ fn lookup_inner(
         };
         let mut result = Vec::new();
         for location in definitions.iter().filter(|location| {
-            ast::Item::can_cast(location.node.kind())
+            location.krate == scope.krate
+                && ast::Item::can_cast(location.node.kind())
                 && !location
                     .node
                     .parent()
                     .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
-                && name(&location.node).as_deref() == Some(text)
+                && name(&location.node).as_deref().map(resolve::ident) == Some(resolve::ident(text))
         }) {
             let rules = ast::MacroRules::cast(location.node.clone());
             let at_root = scope.node.kind() == SyntaxKind::SOURCE_FILE
@@ -593,17 +795,18 @@ fn lookup_inner(
                     .unwrap_or_else(|| target.rsplit("::").next().unwrap_or("").to_owned());
                 if leaf.star_token().is_some() {
                     let path = format!("{target}::{text}");
-                    glob.extend(lookup(definitions, &location, &path, namespace, visited));
-                } else if alias == text {
+                    glob.extend(
+                        lookup(definitions, &location, &path, namespace, visited)
+                            .into_iter()
+                            .map(|b| b.imported(&location, text)),
+                    );
+                } else if resolve::ident(&alias) == resolve::ident(text) {
                     declared = true;
-                    for mut binding in lookup(definitions, &location, &target, namespace, visited) {
-                        binding.imports.push((
-                            location.clone(),
-                            binding.declaration.clone(),
-                            binding.unresolved.clone(),
-                        ));
-                        result.push(binding);
-                    }
+                    result.extend(
+                        lookup(definitions, &location, &target, namespace, visited)
+                            .into_iter()
+                            .map(|b| b.imported(&location, text)),
+                    );
                 }
             }
         }
@@ -617,6 +820,14 @@ fn lookup_inner(
             break;
         }
     }
+    if !declared
+        && namespace == Some(Namespace::Type)
+        && let Some(root) = definitions.iter().find(|d| {
+            d.krate == text && d.module.is_empty() && d.node.kind() == SyntaxKind::SOURCE_FILE
+        })
+    {
+        return vec![root.clone().into()];
+    }
     if declared {
         Vec::new()
     } else {
@@ -628,7 +839,7 @@ fn lookup_inner(
     }
 }
 
-fn path_namespace(path: &ast::Path) -> Option<Namespace> {
+pub(crate) fn path_namespace(path: &ast::Path) -> Option<Namespace> {
     let parent = path.syntax().parent()?;
     match parent.kind() {
         SyntaxKind::PATH
@@ -816,7 +1027,7 @@ pub(crate) fn declaration(source: &Source, scope: &Location) -> Result<Location>
     }
 }
 
-fn references(source: &Source, scope: &Location) -> Result<Vec<Location>> {
+fn references(source: &Source, scope: &Location, replacement: &ast::Path) -> Result<Vec<Location>> {
     let target = scope
         .declaration
         .as_ref()
@@ -844,7 +1055,66 @@ fn references(source: &Source, scope: &Location) -> Result<Vec<Location>> {
         }
     };
     let mut result: Vec<Location> = Vec::new();
+    let method = ast::Fn::cast(target.node.clone())
+        .filter(|f| f.param_list().is_some_and(|p| p.self_param().is_some()))
+        .and_then(|f| f.name());
     for location in scope.descendants() {
+        if let Some(call) = ast::MethodCallExpr::cast(location.node.clone()) {
+            let Some(name) = call.name_ref() else {
+                continue;
+            };
+            if !method
+                .as_ref()
+                .is_some_and(|m| resolve::ident(m.text()) == resolve::ident(name.text()))
+            {
+                continue;
+            }
+            let bound = source.bound(&location, name.syntax().text_range());
+            let m = resolve::method::resolve(
+                &definitions,
+                &location,
+                std::iter::empty(),
+                &call,
+                name.text(),
+                bound,
+            )?
+            .ok_or_else(|| {
+                format!(
+                    "cannot resolve `{call}`; supply its declarations or use Source::bind_method"
+                )
+            })?;
+            if !m.matches(target, unresolved, name.text()) {
+                continue;
+            }
+            if replacement.qualifier().is_some() {
+                let segment = replacement
+                    .segment()
+                    .and_then(|s| s.name_ref())
+                    .ok_or("target has no method name")?;
+                let name = segment.text();
+                let wanted = lookup(
+                    &definitions,
+                    &location,
+                    &resolve::path_name(replacement),
+                    Some(Namespace::Value),
+                    &mut HashSet::new(),
+                );
+                let method = resolve::method::resolve(
+                    &definitions,
+                    &location,
+                    std::iter::empty(),
+                    &call,
+                    name,
+                    None,
+                )?;
+                if !matches!(wanted.as_slice(),[binding] if method.is_some_and(|m|m.matches(&binding.declaration,binding.unresolved.as_deref(),name)))
+                {
+                    return Err(format!("`{call}` cannot call `{replacement}` by method name; use delegate for a qualified function").into());
+                }
+            }
+            result.push(location.at(name.syntax().clone()));
+            continue;
+        }
         if let Some(tree) = ast::UseTree::cast(location.node.clone())
             && tree.use_tree_list().is_none()
             && tree.star_token().is_none()
@@ -923,22 +1193,22 @@ fn references(source: &Source, scope: &Location) -> Result<Vec<Location>> {
             return Err(format!("reference `{path}` has ambiguous declarations").into());
         }
         let binding = matches[0];
-        let import = binding
-            .imports
-            .iter()
-            .find(|(import, declaration, missing)| {
-                scope.module == import.module
-                    && scope
+        let import = binding.imports.iter().find(|route| {
+            let import = &route.leaf;
+            scope.module == import.module
+                && scope
+                    .parents
+                    .first()
+                    .map_or(&scope.root, |frame| &frame.root)
+                    == import
                         .parents
                         .first()
-                        .map_or(&scope.root, |frame| &frame.root)
-                        == import
-                            .parents
-                            .first()
-                            .map_or(&import.root, |frame| &frame.root)
-                    && scope.range().contains_range(import.range())
-                    && matches_target(declaration, missing.as_deref(), namespace)
-            });
+                        .map_or(&import.root, |frame| &frame.root)
+                && scope.range().contains_range(import.range())
+                && ast::UseTree::cast(import.node.clone())
+                    .is_some_and(|tree| tree.star_token().is_none())
+                && matches_target(&route.declaration, route.unresolved.as_deref(), namespace)
+        });
         let shorthand = location
             .node
             .parent()
@@ -947,10 +1217,8 @@ fn references(source: &Source, scope: &Location) -> Result<Vec<Location>> {
             .and_then(ast::RecordExprField::cast)
             .filter(|field| field.colon_token().is_none())
             .map(|field| location.at(field.syntax().clone()));
-        let location = import.map_or_else(
-            || shorthand.unwrap_or(location),
-            |(import, _, _)| import.clone(),
-        );
+        let location =
+            import.map_or_else(|| shorthand.unwrap_or(location), |route| route.leaf.clone());
         if !result.iter().any(|previous| previous.same(&location)) {
             result.push(location);
         }
@@ -966,10 +1234,26 @@ pub(crate) fn redirect(selected: Selected<'_>, target: &str) -> Result<()> {
         return Err("symbol redirection has no insertion or extraction options".into());
     }
     let replacement = fragment::path(target, selected.source.edition)?;
-    let mut references = references(selected.source, &selected.location)?;
+    let mut references = references(selected.source, &selected.location, &replacement)?;
     references.sort_by_key(|location| std::cmp::Reverse(location.range().start()));
     let mut source = selected.source.clone();
     for reference in references {
+        if ast::NameRef::can_cast(reference.node.kind()) {
+            let mut selection = current(&mut source, &reference)?;
+            let call = selection
+                .location
+                .node
+                .parent()
+                .ok_or("method name has no call")?;
+            selection.location = selection.location.at(call);
+            selection.redirect(
+                &replacement
+                    .segment()
+                    .ok_or("target has no method name")?
+                    .to_string(),
+            )?;
+            continue;
+        }
         let arguments = ast::Path::cast(reference.node.clone())
             .filter(|path| resolve::path_name(path) == "Self")
             .and_then(|_| self_type(&reference))
@@ -995,7 +1279,7 @@ pub(crate) fn redirect(selected: Selected<'_>, target: &str) -> Result<()> {
         }
         selection.redirect(target)?;
     }
-    selected.source.root = source.root;
+    *selected.source = source;
     Ok(())
 }
 

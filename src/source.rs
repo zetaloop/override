@@ -1,11 +1,11 @@
 use std::fmt;
 
 use ra_ap_syntax::{
-    AstNode, Edition, SyntaxElement, SyntaxNode, TextRange, TextSize, ast,
-    syntax_editor::SyntaxEditor,
+    AstNode, Edition, SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, ast,
+    syntax_editor::{SyntaxAnnotation, SyntaxEditor},
 };
 
-use crate::{Boundary, Result, Selector, flow, fragment, symbol};
+use crate::{Boundary, Result, Selector, flow, fragment, resolve::method::Target, symbol};
 
 #[derive(Clone)]
 pub struct Source {
@@ -13,6 +13,7 @@ pub struct Source {
     pub(crate) edition: Edition,
     pub(crate) module: String,
     pub(crate) modules: Vec<(String, SyntaxNode, Edition)>,
+    methods: Vec<(SyntaxToken, Target)>,
 }
 
 impl Source {
@@ -22,6 +23,7 @@ impl Source {
             edition,
             module: String::new(),
             modules: Vec::new(),
+            methods: Vec::new(),
         })
     }
 
@@ -41,6 +43,76 @@ impl Source {
     pub fn add_source(&mut self, module: &str, source: &Source) {
         self.modules
             .push((module.to_owned(), source.root.clone(), source.edition));
+    }
+
+    pub fn bind_method(&mut self, selector: Selector, target: &str) -> Result<()> {
+        let at = self.locate(&selector)?;
+        let name = ast::MethodCallExpr::cast(at.node.clone())
+            .and_then(|call| call.name_ref())
+            .ok_or("a method binding needs a selected method call")?;
+        let target = Target::parse(target, name.text(), self.edition)?;
+        let token = token_at(&self.root, at.at(name.syntax().clone()).range())
+            .ok_or("method name has no source token")?;
+        if let Some((_, binding)) = self.methods.iter_mut().find(|(t, _)| *t == token) {
+            *binding = target;
+        } else {
+            self.methods.push((token, target));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bound(&self, at: &Location, name: TextRange) -> Option<&Target> {
+        let root = at.parents.first().map_or(&at.root, |frame| &frame.root);
+        if root != &self.root {
+            return None;
+        }
+        let range = name + at.offset();
+        self.methods
+            .iter()
+            .find_map(|(token, target)| (token.text_range() == range).then_some(target))
+    }
+
+    fn finish(
+        &self,
+        editor: SyntaxEditor,
+        original: &SyntaxNode,
+        offset: TextSize,
+        inserted: impl IntoIterator<Item = (SyntaxToken, Target)>,
+    ) -> (SyntaxNode, Vec<(SyntaxToken, Target)>) {
+        let existing = self.methods.iter().filter_map(|(token, target)| {
+            let range = token.text_range().checked_sub(offset)?;
+            Some((token_at(original, range)?, target.clone()))
+        });
+        let annotations = existing
+            .chain(inserted)
+            .map(|(token, target)| {
+                let mark = SyntaxAnnotation::default();
+                editor.add_annotation(token, mark);
+                (mark, target)
+            })
+            .collect::<Vec<_>>();
+        let edit = editor.finish();
+        let methods = annotations
+            .into_iter()
+            .flat_map(|(mark, target)| {
+                edit.find_annotation(mark)
+                    .iter()
+                    .filter_map(SyntaxElement::as_token)
+                    .cloned()
+                    .map(move |token| (token, target.clone()))
+            })
+            .collect();
+        (edit.new_root().clone(), methods)
+    }
+
+    pub(crate) fn roots(&self) -> impl Iterator<Item = Location> + '_ {
+        std::iter::once((&self.module, &self.root, self.edition))
+            .chain(self.modules.iter().map(|(m, r, e)| (m, r, *e)))
+            .map(|(module, node, edition)| {
+                let mut root = Location::root(node.clone(), edition);
+                root.module = module.clone();
+                root
+            })
     }
 
     pub fn describe(&mut self, description: &str) -> Result<()> {
@@ -121,6 +193,15 @@ impl fmt::Display for Source {
     }
 }
 
+fn token_at(root: &SyntaxNode, range: TextRange) -> Option<SyntaxToken> {
+    if !root.text_range().contains_range(range) {
+        return None;
+    }
+    root.token_at_offset(range.start())
+        .right_biased()
+        .filter(|t| t.text_range() == range)
+}
+
 #[derive(Clone, Debug)]
 pub struct Declaration {
     pub(crate) location: Location,
@@ -139,6 +220,7 @@ impl Declaration {
                 root,
                 node: function.syntax().clone(),
                 edition,
+                krate: String::new(),
                 module: String::new(),
                 parents: Vec::new(),
                 region: None,
@@ -197,7 +279,8 @@ impl Selected<'_> {
         }
         let (editor, _) = SyntaxEditor::new(self.location.root.clone());
         let result = operation(&editor, &self.location.node, self.source.edition)?;
-        let mut root = editor.finish().new_root().clone();
+        let mut offset = self.location.offset();
+        let (mut root, mut methods) = self.source.finish(editor, &self.location.root, offset, []);
         for parent in self.location.parents.iter().rev() {
             let text = root.to_string();
             let body = if parent.delimited {
@@ -207,11 +290,18 @@ impl Selected<'_> {
                 &text
             };
             let tree = fragment::token_tree(body, &parent.tree, self.source.edition)?;
+            let delimiter = TextSize::from(u32::from(!parent.delimited));
+            let start = tree.syntax().text_range().start() + delimiter;
+            let inserted = methods.into_iter().filter_map(|(token, target)| {
+                Some((token_at(tree.syntax(), token.text_range() + start)?, target))
+            });
+            offset -= parent.tree.syntax().text_range().start() + delimiter;
             let (editor, _) = SyntaxEditor::new(parent.root.clone());
             editor.replace(parent.tree.syntax(), tree.syntax());
-            root = editor.finish().new_root().clone();
+            (root, methods) = self.source.finish(editor, &parent.root, offset, inserted);
         }
         self.source.root = root;
+        self.source.methods = methods;
         Ok(result)
     }
 }
@@ -221,6 +311,7 @@ pub(crate) struct Location {
     pub root: SyntaxNode,
     pub node: SyntaxNode,
     pub edition: Edition,
+    pub krate: String,
     pub module: String,
     pub parents: Vec<MacroFrame>,
     pub region: Option<Vec<SyntaxElement>>,
@@ -234,6 +325,7 @@ impl PartialEq for Location {
         self.symbol == other.symbol
             && self.argument == other.argument
             && self.region.is_some() == other.region.is_some()
+            && self.krate == other.krate
             && self.module == other.module
             && self.same(other)
             && self.declaration == other.declaration
@@ -246,6 +338,7 @@ impl Location {
             node: root.clone(),
             edition,
             root,
+            krate: String::new(),
             module: String::new(),
             parents: Vec::new(),
             region: None,
@@ -275,6 +368,7 @@ impl Location {
             node,
             root,
             parents,
+            krate: self.krate.clone(),
             module: self.module.clone(),
             edition: self.edition,
         }
@@ -305,6 +399,14 @@ impl Location {
             .unwrap_or_else(|| self.node.text_range());
         let offset = self.offset();
         TextRange::new(range.start() + offset, range.end() + offset)
+    }
+
+    pub fn contains(&self, other: &Self) -> bool {
+        self.krate == other.krate
+            && self.module == other.module
+            && self.parents.first().map_or(&self.root, |f| &f.root)
+                == other.parents.first().map_or(&other.root, |f| &f.root)
+            && self.range().contains_range(other.range())
     }
 
     pub fn same(&self, other: &Self) -> bool {
@@ -391,6 +493,7 @@ impl Location {
             })
             .ok()?;
         let mut input = Self::root(root, edition);
+        input.krate = self.krate.clone();
         input.module = self.module.clone();
         input.parents = self.parents.clone();
         input.parents.push(MacroFrame {

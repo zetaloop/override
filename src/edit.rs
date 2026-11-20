@@ -1110,7 +1110,7 @@ impl Selected<'_> {
                 )
             })?;
         }
-        self.source.root = source.root;
+        *self.source = source;
         Ok(())
     }
 }

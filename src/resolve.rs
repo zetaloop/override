@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ra_ap_syntax::{
     AstNode, Edition, SyntaxKind, SyntaxNode, ast,
-    ast::{HasGenericArgs, HasName, HasTypeBounds},
+    ast::{HasGenericArgs, HasName},
 };
 
 use crate::{
@@ -11,6 +11,12 @@ use crate::{
     source::Location,
     symbol::{self, Namespace},
 };
+
+pub(crate) mod method;
+
+pub(crate) fn ident(spelling: &str) -> &str {
+    spelling.strip_prefix("r#").unwrap_or(spelling)
+}
 
 pub(crate) fn symbol(text: &str, edition: Edition) -> Result<String> {
     match fragment::ty(text, edition)? {
@@ -197,21 +203,10 @@ pub(crate) fn node_type(node: &SyntaxNode) -> Option<ast::Type> {
 }
 
 pub(crate) fn declarations(source: &Source) -> Vec<(String, Location)> {
-    std::iter::once((source.module.as_str(), &source.root, source.edition))
-        .chain(
-            source
-                .modules
-                .iter()
-                .map(|(name, root, edition)| (name.as_str(), root, *edition)),
-        )
-        .flat_map(|(module, root, edition)| {
-            let mut location = Location::root(root.clone(), edition);
-            location.module = module.to_owned();
-            location
-                .descendants()
-                .into_iter()
-                .map(move |location| (module.to_owned(), location))
-        })
+    source
+        .roots()
+        .flat_map(|root| root.descendants())
+        .map(|location| (location.module.clone(), location))
         .collect()
 }
 
@@ -712,86 +707,6 @@ pub(crate) fn type_text(
         .collect()
 }
 
-fn receiver_types(source: &Source, location: &Location, receiver: &ast::Expr) -> Vec<String> {
-    let mut types = Vec::new();
-    let mut generic_parameters = HashSet::new();
-    if let Some(mut ty) = expression_type(location, receiver) {
-        while let ast::Type::RefType(reference) = &ty {
-            let Some(inner) = reference.ty() else { break };
-            ty = inner;
-        }
-        types.push(fragment::spelling(ty.syntax()));
-        let name = types[0].clone();
-        for node in location.ancestors() {
-            for parameter in node
-                .children()
-                .filter_map(ast::GenericParamList::cast)
-                .flat_map(|list| list.generic_params())
-            {
-                if let ast::GenericParam::TypeParam(parameter) = &parameter
-                    && let Some(name) = parameter.name()
-                {
-                    generic_parameters.insert(name.text().to_string());
-                }
-                if let ast::GenericParam::TypeParam(parameter) = parameter
-                    && parameter
-                        .name()
-                        .is_some_and(|parameter| parameter.text() == name)
-                    && let Some(bounds) = parameter.type_bound_list()
-                {
-                    types.extend(
-                        bounds
-                            .bounds()
-                            .filter_map(|bound| bound.ty())
-                            .map(|ty| fragment::spelling(ty.syntax())),
-                    );
-                }
-            }
-        }
-    } else if let ast::Expr::RecordExpr(record) = receiver
-        && let Some(path) = record.path()
-    {
-        types.push(fragment::spelling(path.syntax()));
-    }
-    types.retain(|name| !generic_parameters.contains(name));
-    let mut seen = HashSet::new();
-    let mut cursor = 0;
-    while cursor < types.len() {
-        let name = types[cursor].clone();
-        cursor += 1;
-        if !seen.insert(name.clone()) || generic_parameters.contains(&name) {
-            continue;
-        }
-        let wanted = paths(location, &name);
-        for (module, declaration) in declarations(source) {
-            let full = [module, qualified(&declaration)]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("::");
-            if let Some(alias) = ast::TypeAlias::cast(declaration.node.clone())
-                && wanted.contains(&full)
-                && let Some(mut ty) = alias.ty()
-            {
-                while let ast::Type::RefType(reference) = &ty {
-                    let Some(inner) = reference.ty() else { break };
-                    ty = inner;
-                }
-                if let ast::Type::PathType(ty) = ty
-                    && let Some(path) = ty.path()
-                {
-                    types.extend(
-                        paths(&declaration, &path_text(&path))
-                            .into_iter()
-                            .map(|name| format!("crate::{name}")),
-                    );
-                }
-            }
-        }
-    }
-    types
-}
-
 fn call_declaration(
     source: &Source,
     location: &Location,
@@ -805,13 +720,27 @@ fn call_declaration(
     }
     let mut reference = location.clone();
     let mut name = call_name(&location.node).ok_or("selection requires a named call")?;
-    let wanted = if let Some(call) = ast::MethodCallExpr::cast(location.node.clone()) {
-        let receiver = call.receiver().ok_or("method call has no receiver")?;
-        receiver_types(source, location, &receiver)
-            .into_iter()
-            .flat_map(|ty| paths(location, &format!("{ty}::{name}")))
-            .collect::<Vec<_>>()
-    } else {
+    let definitions = declarations(source)
+        .into_iter()
+        .map(|(_, at)| at)
+        .collect::<Vec<_>>();
+    if let Some(call) = ast::MethodCallExpr::cast(location.node.clone()) {
+        let member = call.name_ref().ok_or("method call has no name")?;
+        return method::resolve(
+            &definitions,
+            location,
+            std::iter::empty(),
+            &call,
+            member.text(),
+            source.bound(location, member.syntax().text_range()),
+        )?
+        .and_then(|method| method.declaration)
+        .filter(|decl| kind(decl.node.kind()))
+        .ok_or_else(|| {
+            format!("declaration of `{call}` is unavailable; supply its signature").into()
+        });
+    }
+    let wanted = {
         let mut visited = HashSet::new();
         'reference: loop {
             if !visited.insert((reference.node.clone(), name.clone())) {
@@ -893,13 +822,13 @@ fn call_declaration(
             break paths(&reference, &name);
         }
     };
-    let candidates = declarations(source)
+    let candidates = definitions
         .into_iter()
-        .filter_map(|(module, declaration)| {
+        .filter_map(|declaration| {
             if !kind(declaration.node.kind()) {
                 return None;
             }
-            let full = [module, qualified(&declaration)]
+            let full = [declaration.module.clone(), qualified(&declaration)]
                 .into_iter()
                 .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()

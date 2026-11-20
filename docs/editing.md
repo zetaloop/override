@@ -234,6 +234,8 @@ source.select(root().symbol("State"))?.redirect("crate::shared::State")?;
 
 The name is resolved through the scope's declarations and imports, and every path and associated reference to that declaration is rewritten. When the name is ambiguous, `declared_by` identifies the declaration.
 
+Redirecting `Meter::read` to `Meter::revised` changes both `m.read()` and `Meter::read(m)` to calls of `revised` in their original form.
+
 A symbol selection covers the references and supports `redirect`. A declaration selection covers the declaration itself and supports edits such as `rename`, `set_visibility` and `remove`.
 
 ## Reusing upstream logic
