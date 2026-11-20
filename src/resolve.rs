@@ -945,10 +945,22 @@ fn call_declaration(
     }
 }
 
-pub(crate) fn argument(source: &Source, location: &Location, name: &str) -> Result<Location> {
-    let declaration = call_declaration(source, location, ast::Fn::can_cast)?;
-    let function =
-        ast::Fn::cast(declaration.node).ok_or("argument declaration must be a function")?;
+fn callable(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::FN | SyntaxKind::STRUCT | SyntaxKind::VARIANT
+    )
+}
+
+pub(crate) fn argument(
+    source: &Source,
+    location: &Location,
+    name: &str,
+) -> Result<Option<Location>> {
+    let declaration = call_declaration(source, location, callable)?;
+    let Some(function) = ast::Fn::cast(declaration.node) else {
+        return Ok(None);
+    };
     let parameters = function
         .param_list()
         .ok_or("declaration has no parameters")?;
@@ -978,11 +990,13 @@ pub(crate) fn argument(source: &Source, location: &Location, name: &str) -> Resu
         return Err("call and declaration have different argument counts".into());
     }
     if method && name == "self" {
-        return Ok(location.at(ast::MethodCallExpr::cast(location.node.clone())
-            .and_then(|call| call.receiver())
-            .ok_or("missing receiver")?
-            .syntax()
-            .clone()));
+        return Ok(Some(
+            location.at(ast::MethodCallExpr::cast(location.node.clone())
+                .and_then(|call| call.receiver())
+                .ok_or("missing receiver")?
+                .syntax()
+                .clone()),
+        ));
     }
     let positions = parameter_names
         .iter()
@@ -991,8 +1005,8 @@ pub(crate) fn argument(source: &Source, location: &Location, name: &str) -> Resu
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     match positions.as_slice() {
-        [index] => Ok(location.at(arguments[*index].syntax().clone())),
-        [] => Err(format!("declaration has no parameter named `{name}`").into()),
+        [index] => Ok(Some(location.at(arguments[*index].syntax().clone()))),
+        [] => Ok(None),
         _ => Err(format!("parameter `{name}` is ambiguous").into()),
     }
 }
@@ -1124,14 +1138,17 @@ fn references_type(source: &Source, usage: &Location, name: &str, target: &Locat
 pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result<Vec<Location>> {
     fragment::name(name, source.edition)?;
     if let Some(arguments) = arguments(&location.node) {
-        let declaration = call_declaration(source, location, |kind| {
-            matches!(kind, SyntaxKind::STRUCT | SyntaxKind::VARIANT)
-        })?;
-        let list = declaration
+        if ast::MethodCallExpr::can_cast(location.node.kind()) {
+            return Ok(Vec::new());
+        }
+        let declaration = call_declaration(source, location, callable)?;
+        let Some(list) = declaration
             .node
             .children()
             .find_map(ast::TupleFieldList::cast)
-            .ok_or("constructor has no tuple fields")?;
+        else {
+            return Ok(Vec::new());
+        };
         let members = list.fields().collect::<Vec<_>>();
         let arguments = arguments.args().collect::<Vec<_>>();
         if arguments.len() != members.len() {
@@ -1150,7 +1167,7 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
             })
             .collect();
     }
-    let list = location
+    let Some(list) = location
         .node
         .children()
         .find(|node| {
@@ -1167,7 +1184,9 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                 .filter(|ty| ast::TupleType::can_cast(ty.syntax().kind()))
                 .map(|ty| ty.syntax().clone())
         })
-        .ok_or("selected object has no fields")?;
+    else {
+        return Ok(Vec::new());
+    };
     if matches!(
         list.kind(),
         SyntaxKind::RECORD_FIELD_LIST | SyntaxKind::RECORD_EXPR_FIELD_LIST

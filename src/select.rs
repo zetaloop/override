@@ -207,19 +207,21 @@ impl Selector {
                             }
                         }
                     }
-                    Step::Field(name) => next.extend(resolve::fields(source, scope, name)?),
+                    Step::Field(name) if scope.region.is_none() => {
+                        next.extend(resolve::fields(source, scope, name)?)
+                    }
                     Step::Parameter(name) => {
-                        if scope.region.is_some() {
-                            return Err("a region has no parameter list".into());
-                        }
                         if name != "self" {
                             fragment::name(name, source.edition)?;
                         }
-                        let list = scope
+                        let Some(list) = scope
                             .node
                             .children()
                             .find_map(ast::ParamList::cast)
-                            .ok_or("selected object has no parameters")?;
+                            .filter(|_| scope.region.is_none())
+                        else {
+                            continue;
+                        };
                         for parameter in list.params() {
                             if parameter.pat().is_some_and(|pattern| {
                                 resolve::pattern_names(&pattern)
@@ -235,15 +237,15 @@ impl Selector {
                             next.push(scope.at(receiver.syntax().clone()));
                         }
                     }
-                    Step::Argument(name) => {
-                        let mut argument = resolve::argument(source, scope, name)?;
-                        argument.argument = true;
-                        next.push(argument);
-                    }
-                    Step::Attribute(text) => {
-                        if scope.region.is_some() {
-                            return Err("a region has no attributes".into());
+                    Step::Argument(name)
+                        if scope.region.is_none() && arguments(&scope.node).is_some() =>
+                    {
+                        if let Some(mut argument) = resolve::argument(source, scope, name)? {
+                            argument.argument = true;
+                            next.push(argument);
                         }
+                    }
+                    Step::Attribute(text) if scope.region.is_none() => {
                         let name = fragment::path(text, source.edition)
                             .ok()
                             .map(|path| resolve::path_text(&path));
@@ -277,15 +279,10 @@ impl Selector {
                             }
                         }
                     }
-                    Step::Body => {
-                        if scope.region.is_some() {
-                            return Err("a region is already a body selection".into());
-                        }
-                        next.push(
-                            scope.at(body(&scope.node).ok_or("selected object has no body")?),
-                        );
+                    Step::Body if scope.region.is_none() => {
+                        next.extend(body(&scope.node).map(|node| scope.at(node)));
                     }
-                    Step::Condition => {
+                    Step::Condition if scope.region.is_none() => {
                         let condition = ast::IfExpr::cast(scope.node.clone())
                             .and_then(|node| node.condition())
                             .or_else(|| {
@@ -296,13 +293,13 @@ impl Selector {
                                 ast::ForExpr::cast(scope.node.clone())
                                     .and_then(|node| node.iterable())
                             });
-                        next.push(
-                            scope.at(condition
-                                .ok_or("selected object has no condition")?
-                                .syntax()
-                                .clone()),
-                        );
+                        next.extend(condition.map(|expr| scope.at(expr.syntax().clone())));
                     }
+                    Step::Argument(_)
+                    | Step::Body
+                    | Step::Condition
+                    | Step::Field(_)
+                    | Step::Attribute(_) => {}
                     Step::Region(start, end) => {
                         next.push(region::select(source, scope, start, end)?);
                     }
@@ -398,7 +395,7 @@ impl Selector {
                                 SyntaxKind::CALL_EXPR | SyntaxKind::METHOD_CALL_EXPR
                             )
                         {
-                            return Err("declaration association requires a call or symbol".into());
+                            continue;
                         }
                         let mut location = scope.clone();
                         location.declaration = Some(Box::new(declaration.location.clone()));
