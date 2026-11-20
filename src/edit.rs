@@ -1091,13 +1091,7 @@ impl Selected<'_> {
                 .ok_or("control-flow declaration scope is missing after extraction")?;
             let name = declaration.name().ok_or("control-flow type has no name")?;
             let scope = location.node.parent().ok_or("declaration has no parent")?;
-            if location.at(scope).descendants().iter().any(|candidate| {
-                candidate
-                    .node
-                    .children()
-                    .find_map(ast::Name::cast)
-                    .is_some_and(|existing| existing.text() == name.text())
-            }) {
+            if crate::symbol::declares_type(&source, &location.at(scope), name.text()) {
                 return Err(format!("control-flow type `{}` already exists", name.text()).into());
             }
             let position = (location.clone(), Edge::Before);

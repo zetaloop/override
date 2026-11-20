@@ -649,6 +649,57 @@ fn path_namespace(path: &ast::Path) -> Option<Namespace> {
     }
 }
 
+pub(crate) fn declares_type(source: &Source, scope: &Location, expected: &str) -> bool {
+    let same_name = |name: &str| name.trim_start_matches("r#") == expected.trim_start_matches("r#");
+    let mut definitions = None;
+    for node in scope.node.children() {
+        if belongs(&node, Some(Namespace::Type)) {
+            let declared = if let Some(ext) = ast::ExternCrate::cast(node.clone()) {
+                ext.rename().map_or_else(
+                    || ext.name_ref().map(|n| n.to_string()),
+                    |r| r.name().map(|n| n.to_string()),
+                )
+            } else {
+                name(&node)
+            };
+            if declared.as_deref().is_some_and(same_name) {
+                return true;
+            }
+        }
+        if let Some(import) = ast::Use::cast(node) {
+            for leaf in import.syntax().descendants().filter_map(ast::UseTree::cast) {
+                if leaf.use_tree_list().is_some() || leaf.star_token().is_some() {
+                    continue;
+                }
+                let path = resolve::import_path(&leaf);
+                let alias = leaf.rename().map_or_else(
+                    || path.rsplit("::").next().map(str::to_owned),
+                    |r| r.name().map(|n| n.to_string()),
+                );
+                if alias.as_deref().is_some_and(same_name)
+                    && lookup(
+                        definitions.get_or_insert_with(|| {
+                            resolve::declarations(source)
+                                .into_iter()
+                                .map(|(_, at)| at)
+                                .collect::<Vec<_>>()
+                        }),
+                        &scope.at(leaf.syntax().clone()),
+                        &path,
+                        Some(Namespace::Type),
+                        &mut HashSet::new(),
+                    )
+                    .iter()
+                    .any(|b| b.unresolved.is_none())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -> bool {
     match pattern {
         ast::Pat::WildcardPat(_) => true,
