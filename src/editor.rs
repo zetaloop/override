@@ -25,7 +25,7 @@ pub use toml::Table as Manifest;
 
 pub use ra_ap_syntax::Edition;
 pub use region::Boundary;
-pub use select::{Selector, arm, call, item, root};
+pub use select::{Parameter, Selector, arm, call, item, root};
 pub use source::{Declaration, Selected, Source};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

@@ -20,7 +20,7 @@ enum Step {
     Find(Matcher),
     Field(String),
     Parameter(String),
-    Argument(String),
+    Argument(Parameter),
     Attribute(String),
     Body,
     Condition,
@@ -51,6 +51,30 @@ enum Matcher {
     Variant(String),
     Generic(String),
     Kind(SyntaxKind),
+}
+
+#[derive(Clone, Debug)]
+pub enum Parameter {
+    Name(String),
+    Declaration(Declaration),
+}
+
+impl From<&str> for Parameter {
+    fn from(name: &str) -> Self {
+        Self::Name(name.into())
+    }
+}
+
+impl From<&String> for Parameter {
+    fn from(name: &String) -> Self {
+        Self::Name(name.clone())
+    }
+}
+
+impl From<&Declaration> for Parameter {
+    fn from(declaration: &Declaration) -> Self {
+        Self::Declaration(declaration.clone())
+    }
 }
 
 pub fn root() -> Selector {
@@ -135,8 +159,8 @@ impl Selector {
     pub fn parameter(self, name: &str) -> Self {
         self.step(Step::Parameter(name.to_owned()))
     }
-    pub fn argument(self, name: &str) -> Self {
-        self.step(Step::Argument(name.to_owned()))
+    pub fn argument(self, parameter: impl Into<Parameter>) -> Self {
+        self.step(Step::Argument(parameter.into()))
     }
     pub fn body(self) -> Self {
         self.step(Step::Body)

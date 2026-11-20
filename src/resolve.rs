@@ -7,7 +7,7 @@ use ra_ap_syntax::{
 
 use crate::{
     Result, Source, fragment,
-    select::arguments,
+    select::{Parameter, arguments},
     source::Location,
     symbol::{self, Namespace},
 };
@@ -695,6 +695,10 @@ pub(crate) fn type_text(
     substitutions: &[(String, String)],
 ) -> String {
     let imports = imports(context);
+    let definitions = declarations(source)
+        .into_iter()
+        .map(|(_, at)| at)
+        .collect::<Vec<_>>();
     let generics = context
         .ancestors()
         .into_iter()
@@ -780,13 +784,17 @@ pub(crate) fn type_text(
             if !head || generics.contains(name) || name == "Self" {
                 return name.to_owned();
             }
-            if let Some((_, target)) = imports.iter().find(|(alias, _)| alias == name) {
-                if target.starts_with("self::") || target.starts_with("super::") {
-                    return format!("crate::{}", absolute(target, &module_path(context)));
-                }
-                return target.clone();
-            }
-            if let Some(declaration) = nominal_types(source, context, name).first() {
+            let bindings = symbol::lookup(
+                &definitions,
+                context,
+                name,
+                Some(Namespace::Type),
+                &mut HashSet::new(),
+            );
+            if let [b] = bindings.as_slice()
+                && b.unresolved.is_none()
+            {
+                let declaration = &b.declaration;
                 if declaration
                     .node
                     .ancestors()
@@ -800,6 +808,12 @@ pub(crate) fn type_text(
                     .collect::<Vec<_>>()
                     .join("::");
                 return format!("crate::{full}");
+            }
+            if let Some((_, target)) = imports.iter().find(|(alias, _)| alias == name) {
+                if target.starts_with("self::") || target.starts_with("super::") {
+                    return format!("crate::{}", absolute(target, &module_path(context)));
+                }
+                return target.clone();
             }
             name.to_owned()
         })
@@ -955,60 +969,90 @@ fn callable(kind: SyntaxKind) -> bool {
 pub(crate) fn argument(
     source: &Source,
     location: &Location,
-    name: &str,
+    parameter: &Parameter,
 ) -> Result<Option<Location>> {
-    let declaration = call_declaration(source, location, callable)?;
-    let Some(function) = ast::Fn::cast(declaration.node) else {
+    let declaration = match parameter {
+        Parameter::Name(_) => call_declaration(source, location, callable)?,
+        Parameter::Declaration(decl) => {
+            let node = &decl.location.node;
+            if !matches!(node.kind(), SyntaxKind::PARAM | SyntaxKind::SELF_PARAM) {
+                return Err("argument selection requires a parameter declaration".into());
+            }
+            let owner = node
+                .parent()
+                .and_then(|list| list.parent())
+                .and_then(ast::Fn::cast)
+                .ok_or("parameter does not belong to a function")?;
+            let owner = decl.location.at(owner.syntax().clone());
+            if location
+                .declaration
+                .as_deref()
+                .is_some_and(|f| !f.same(&owner))
+            {
+                return Err(
+                    "parameter belongs to a different function than the supplied call declaration"
+                        .into(),
+                );
+            }
+            owner
+        }
+    };
+    let Some(function) = ast::Fn::cast(declaration.node.clone()) else {
         return Ok(None);
     };
     let parameters = function
         .param_list()
         .ok_or("declaration has no parameters")?;
-    let method = ast::MethodCallExpr::can_cast(location.node.kind());
-    let receiver = parameters.self_param();
-    if method && receiver.is_none() {
+    let method = ast::MethodCallExpr::cast(location.node.clone());
+    if method.is_some() && parameters.self_param().is_none() {
         return Err("a method call requires a declaration with a receiver".into());
     }
-    let mut parameter_names = Vec::new();
-    if receiver.is_some() && !method {
-        parameter_names.push(vec!["self".to_owned()]);
-    }
-    parameter_names.extend(parameters.params().map(|parameter| {
-        match parameter.pat() {
-            Some(ast::Pat::IdentPat(pattern)) => pattern
-                .name()
-                .map(|name| vec![name.text().to_string()])
-                .unwrap_or_default(),
-            _ => Vec::new(),
+    if let Some(param) = parameters.self_param()
+        && match parameter {
+            Parameter::Name(n) => n == "self",
+            Parameter::Declaration(d) => d.location.node == *param.syntax(),
         }
-    }));
-    let arguments = arguments(&location.node)
-        .ok_or("call has no arguments")?
-        .args()
+    {
+        let receiver = method
+            .as_ref()
+            .and_then(|m| m.receiver())
+            .or_else(|| arguments(&location.node)?.args().next())
+            .ok_or("call has no receiver")?;
+        let mut value = location.at(receiver.syntax().clone());
+        if method.is_some() {
+            value.declaration = Some(Box::new(declaration));
+        }
+        return Ok(Some(value));
+    }
+    let params = parameters
+        .syntax()
+        .children()
+        .filter(|n| matches!(n.kind(), SyntaxKind::PARAM | SyntaxKind::SELF_PARAM))
         .collect::<Vec<_>>();
-    if arguments.len() != parameter_names.len() {
+    let arguments = method
+        .and_then(|m| m.receiver())
+        .into_iter()
+        .chain(
+            arguments(&location.node)
+                .ok_or("call has no arguments")?
+                .args(),
+        )
+        .collect::<Vec<_>>();
+    if arguments.len() != params.len() {
         return Err("call and declaration have different argument counts".into());
     }
-    if method && name == "self" {
-        return Ok(Some(
-            location.at(ast::MethodCallExpr::cast(location.node.clone())
-                .and_then(|call| call.receiver())
-                .ok_or("missing receiver")?
-                .syntax()
-                .clone()),
-        ));
+    let mut matches=params.into_iter().zip(arguments).filter(|(p,_)|match parameter{
+        Parameter::Declaration(decl)=>*p==decl.location.node,
+        Parameter::Name(name) if ast::SelfParam::can_cast(p.kind())=>name=="self",
+        Parameter::Name(name)=>ast::Param::cast(p.clone()).and_then(|p|p.pat()).is_some_and(|pat|matches!(pat,ast::Pat::IdentPat(p) if p.pat().is_none() && p.name().is_some_and(|n|ident(n.text())==ident(name)))),
+    });
+    let found = matches
+        .next()
+        .map(|(_, expr)| location.at(expr.syntax().clone()));
+    if matches.next().is_some() {
+        return Err("argument selection matches several parameters".into());
     }
-    let positions = parameter_names
-        .iter()
-        .enumerate()
-        .filter(|(_, names)| names.iter().any(|parameter| parameter == name))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    match positions.as_slice() {
-        [index] => Ok(Some(location.at(arguments[*index].syntax().clone()))),
-        [] => Ok(None),
-        _ => Err(format!("parameter `{name}` is ambiguous").into()),
-    }
+    Ok(found)
 }
 
 fn nominal_types(source: &Source, usage: &Location, text: &str) -> Vec<Location> {
@@ -1056,6 +1100,7 @@ fn nominal_types(source: &Source, usage: &Location, text: &str) -> Vec<Location>
                     | SyntaxKind::ENUM
                     | SyntaxKind::VARIANT
                     | SyntaxKind::UNION
+                    | SyntaxKind::TRAIT
                     | SyntaxKind::TYPE_ALIAS
             )
         };

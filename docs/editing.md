@@ -124,7 +124,14 @@ source
 
 `Source::declaration(query)` and `Selected::declaration()` take a declaration from parsed source instead. `declared_by` attaches such a declaration to a call or symbol query.
 
-`argument("self")` selects `state` in `state.snapshot()` or `&state` in `State::snapshot(&state)`. Use `set_value` to replace either expression. Arguments inside the parentheses can also be removed with `remove`.
+`argument("self")` selects `state` in `state.snapshot()` or `&state` in `State::snapshot(&state)`. Use `set_value` to replace either expression. When converting a method to an associated function, `remove` drops the receiver and qualifies the call with its owning type and trait. An already qualified call keeps its path.
+
+For `fn draw((x, y): (i32, i32))`, the call `draw(point)` has one argument. Select the parameter from the API source to replace that whole argument in the caller:
+
+```rust
+let point = api.declaration(item("draw").parameter("x"))?;
+caller.select(call("draw").argument(&point))?.set_value("origin")?;
+```
 
 ### Interface and layout descriptions
 

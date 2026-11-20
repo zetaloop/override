@@ -21,6 +21,12 @@ pub(crate) struct Target {
 }
 
 impl Target {
+    pub fn qualifier(&self) -> String {
+        match &self.trait_ {
+            Some(t) => format!("<{} as {t}>", self.owner),
+            None => format!("<{}>", self.owner),
+        }
+    }
     pub fn parse(path: &str, name: &str, edition: Edition) -> Result<Self> {
         let path = fragment::path(path, edition)?;
         let method = path
@@ -51,10 +57,101 @@ impl Target {
     }
 }
 
+pub(crate) fn qualifier(
+    source: &crate::Source,
+    at: &Location,
+    call: &ast::MethodCallExpr,
+) -> Result<String> {
+    let name = call.name_ref().ok_or("method has no name")?;
+    if let Some(target) = source.bound(at, name.syntax().text_range()) {
+        return Ok(target.qualifier());
+    }
+    let decl = at
+        .declaration
+        .as_deref()
+        .ok_or("receiver has no method declaration")?;
+    let mut implementation = decl
+        .ancestors()
+        .into_iter()
+        .find_map(ast::Impl::cast)
+        .map(|i| decl.at(i.syntax().clone()));
+    if implementation.is_none() {
+        let defs = super::declarations(source)
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect::<Vec<_>>();
+        implementation = resolve(&defs, at, std::iter::empty(), call, name.text(), None)?
+            .filter(|m| m.matches(decl, None, name.text()))
+            .and_then(|m| m.implementation);
+    }
+    if let Some(site) = &implementation
+        && let Some(implementation) = ast::Impl::cast(site.node.clone())
+        && !implementation
+            .syntax()
+            .children()
+            .any(|n| ast::GenericParamList::can_cast(n.kind()))
+    {
+        let ty = implementation.self_ty().ok_or("impl has no self type")?;
+        let owner = super::type_text(source, site, ty.syntax(), &[]);
+        return Ok(match implementation.trait_() {
+            Some(t) => format!(
+                "<{owner} as {}>",
+                super::type_text(source, site, t.syntax(), &[])
+            ),
+            None => format!("<{owner}>"),
+        });
+    }
+    let receiver = call.receiver().ok_or("call has no receiver")?;
+    let mut ty = super::value_type(source, at, &receiver)
+        .ok_or("receiver type is unavailable; bind the method to its owning type")?;
+    while let ast::Type::RefType(r) = &ty {
+        ty = r.ty().ok_or("missing receiver type")?;
+    }
+    let owner = super::type_text(source, at, ty.syntax(), &[]);
+    if let Some(t) = decl.ancestors().into_iter().find_map(ast::Trait::cast) {
+        if t.syntax()
+            .children()
+            .any(|n| ast::GenericParamList::can_cast(n.kind()))
+        {
+            return Err(
+                "trait arguments are unavailable; bind the method to its instantiated trait".into(),
+            );
+        }
+        let location = decl.at(t.syntax().clone());
+        let path = [location.module.clone(), super::qualified(&location)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("::");
+        return Ok(format!("<{owner} as crate::{path}>"));
+    }
+    if decl
+        .ancestors()
+        .into_iter()
+        .find_map(ast::Impl::cast)
+        .is_some_and(|i| i.trait_().is_some())
+    {
+        return Err(
+            "trait arguments are unavailable; bind the method to its instantiated trait".into(),
+        );
+    }
+    if !decl
+        .ancestors()
+        .into_iter()
+        .any(|n| ast::Impl::can_cast(n.kind()))
+    {
+        return Err(
+            "method signature has no owning declaration; bind the method to its owning type".into(),
+        );
+    }
+    Ok(format!("<{owner}>"))
+}
+
 pub(crate) struct Method {
     pub declaration: Option<Location>,
     pub trait_: Option<(Binding, String)>,
     owner: Ty,
+    implementation: Option<Location>,
 }
 
 impl Method {
@@ -502,6 +599,7 @@ pub(crate) fn resolve<'a>(
         candidates.push((
             (rank, trait_.is_some()),
             Method {
+                implementation: Some(decl.clone()),
                 declaration: Some(function),
                 owner,
                 trait_,
@@ -534,6 +632,7 @@ pub(crate) fn resolve<'a>(
                 candidates.push((
                     (rank, false),
                     Method {
+                        implementation: None,
                         declaration: Some(f),
                         owner: actual.clone(),
                         trait_: None,
@@ -559,6 +658,7 @@ pub(crate) fn resolve<'a>(
         return Ok(Some(method));
     }
     Ok(bound.map(|(owner, trait_, declaration)| Method {
+        implementation: None,
         owner,
         trait_,
         declaration,

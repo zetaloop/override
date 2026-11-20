@@ -604,6 +604,28 @@ impl Selected<'_> {
 
     pub fn remove(self) -> Result<()> {
         let argument = self.location.argument;
+        if argument
+            && let Some(call) = self
+                .location
+                .node
+                .parent()
+                .and_then(ast::MethodCallExpr::cast)
+        {
+            let owner = resolve::method::qualifier(self.source, &self.location, &call)?;
+            let dot = call.dot_token().ok_or("method call has no dot")?;
+            let suffix = call
+                .syntax()
+                .children_with_tokens()
+                .skip_while(|e| e.as_token() != Some(&dot))
+                .skip(1)
+                .map(|e| e.to_string())
+                .collect::<String>();
+            let target = fragment::expression(&format!("{owner}::{suffix}"), self.source.edition)?;
+            return self.edit(|editor, _, _| {
+                editor.replace(call.syntax(), target.syntax());
+                Ok(())
+            });
+        }
         self.edit(|editor, node, _| {
             if let Some(tree) = ast::UseTree::cast(node.clone()) {
                 let branch = import_branch(&tree)?;
