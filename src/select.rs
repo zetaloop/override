@@ -237,7 +237,7 @@ impl Selector {
                     }
                     Step::Argument(name) => {
                         let mut argument = resolve::argument(source, scope, name)?;
-                        argument.argument = name != "self";
+                        argument.argument = true;
                         next.push(argument);
                     }
                     Step::Attribute(text) => {

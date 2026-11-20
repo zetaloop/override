@@ -460,6 +460,15 @@ impl Selected<'_> {
         let argument = self.location.argument;
         self.edit(|editor, node, edition| {
             let expression = fragment::expression(value, edition)?;
+            let expression = if argument
+                && node
+                    .parent()
+                    .is_some_and(|parent| expression.needs_parens_in_place_of(&parent, node))
+            {
+                make::expr_paren(expression).into()
+            } else {
+                expression
+            };
             let expression = fragment::indent(expression.syntax(), &fragment::indentation(node));
             if argument {
                 editor.replace(node, &expression);
@@ -571,6 +580,9 @@ impl Selected<'_> {
                         )
                     }));
             if !(argument
+                && node
+                    .parent()
+                    .is_some_and(|parent| ast::ArgList::can_cast(parent.kind()))
                 || item
                 || ast::AnyAttr::can_cast(node.kind())
                 || matches!(

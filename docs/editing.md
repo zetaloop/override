@@ -124,7 +124,7 @@ source
 
 `Source::declaration(query)` and `Selected::declaration()` take a declaration from parsed source instead. `declared_by` attaches such a declaration to a call or symbol query.
 
-`argument("self")` selects a method receiver. Other named arguments can be changed with `set_value` or removed with `remove`.
+`argument("self")` selects `state` in `state.snapshot()` or `&state` in `State::snapshot(&state)`. Use `set_value` to replace either expression. Arguments inside the parentheses can also be removed with `remove`.
 
 ### Interface and layout descriptions
 
