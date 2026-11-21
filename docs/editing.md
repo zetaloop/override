@@ -148,7 +148,7 @@ source.describe("Pair(left, right)")?;
 source.select(item("Pair").field("right"))?.set_type("u16")?;
 ```
 
-For `struct Pair(u8, u8);`, the pattern supplies the field names used by the query. Destructuring patterns and getters in the available source can supply them as well.
+For `struct Pair(u8, u8);`, the description assigns `left` and `right` to the two field positions. A getter that directly returns `self.1` or `&self.1` also names that field.
 
 ## Editing declarations and values
 

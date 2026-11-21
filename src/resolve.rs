@@ -1237,7 +1237,7 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
         SyntaxKind::RECORD_FIELD_LIST | SyntaxKind::RECORD_EXPR_FIELD_LIST
     ) {
         let mut names = vec![name.to_owned()];
-        for (_, usage) in declarations(source) {
+        for usage in source.roots() {
             if let Some(pattern) = ast::RecordPat::cast(usage.node.clone())
                 && pattern.path().is_some_and(|path| {
                     references_type(source, &usage, &path_name(&path), location)
@@ -1252,11 +1252,7 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                         .syntax()
                         .children()
                         .find_map(ast::Pat::cast)
-                        .is_some_and(|pattern| {
-                            pattern_names(&pattern)
-                                .iter()
-                                .any(|binding| binding == name)
-                        })
+                        .is_some_and(|pattern| binding_name(pattern, name))
                         && let Some(field) = field.name_ref()
                     {
                         names.push(field.text().to_string());
@@ -1285,32 +1281,14 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
     let mut positions = HashSet::new();
     for (_, usage) in declarations(source) {
         if let Some(pattern) = ast::TupleStructPat::cast(usage.node.clone())
+            && usage.node == usage.root
             && pattern
                 .path()
                 .is_some_and(|path| references_type(source, &usage, &path_name(&path), location))
         {
             for (index, field) in tuple_pattern_bindings(pattern.fields(), field_count)? {
-                if pattern_names(&field).iter().any(|binding| binding == name) {
+                if binding_name(field, name) {
                     positions.insert(index);
-                }
-            }
-        }
-        if let Some(binding) = ast::LetStmt::cast(usage.node.clone())
-            && let Some(ast::Pat::TuplePat(pattern)) = binding.pat()
-            && let Some(initializer) = binding.initializer()
-            && let Some(mut ty) = binding
-                .ty()
-                .or_else(|| expression_type(&usage, &initializer))
-        {
-            while let ast::Type::RefType(reference) = &ty {
-                let Some(inner) = reference.ty() else { break };
-                ty = inner;
-            }
-            if references_type(source, &usage, &fragment::spelling(ty.syntax()), location) {
-                for (index, field) in tuple_pattern_bindings(pattern.fields(), field_count)? {
-                    if pattern_names(&field).iter().any(|binding| binding == name) {
-                        positions.insert(index);
-                    }
                 }
             }
         }
@@ -1327,28 +1305,40 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                     references_type(source, &usage, &fragment::spelling(ty.syntax()), location)
                 })
         {
-            for field in usage.node.descendants().filter_map(ast::FieldExpr::cast) {
-                if field
-                    .expr()
-                    .is_some_and(|receiver| fragment::spelling(receiver.syntax()) == "self")
-                {
-                    for token in field
-                        .syntax()
-                        .children_with_tokens()
-                        .flat_map(|element| match element {
-                            ra_ap_syntax::SyntaxElement::Node(node)
-                                if ast::NameRef::can_cast(node.kind()) =>
-                            {
-                                node.children_with_tokens().collect::<Vec<_>>()
+            let mut next = function.body().map(ast::Expr::BlockExpr);
+            while let Some(expr) = next {
+                next = match expr {
+                    ast::Expr::BlockExpr(block) if block.modifier().is_none() => {
+                        block.stmt_list().and_then(|list| {
+                            let mut statements = list.statements();
+                            match (statements.next(), statements.next(), list.tail_expr()) {
+                                (None, _, tail) => tail,
+                                (Some(ast::Stmt::ExprStmt(stmt)), None, None) => stmt
+                                    .expr()
+                                    .filter(|e| matches!(e, ast::Expr::ReturnExpr(_))),
+                                _ => None,
                             }
-                            element => vec![element],
                         })
-                        .filter_map(|element| element.into_token())
-                        .filter(|token| token.kind() == SyntaxKind::INT_NUMBER)
-                    {
-                        positions.insert(token.text().parse::<usize>()?);
                     }
-                }
+                    ast::Expr::ParenExpr(e) => e.expr(),
+                    ast::Expr::RefExpr(e) => e.expr(),
+                    ast::Expr::ReturnExpr(e) => e.expr(),
+                    ast::Expr::FieldExpr(field) => {
+                        if field
+                            .expr()
+                            .is_some_and(|e| fragment::spelling(e.syntax()) == "self")
+                            && let Some(index) = field
+                                .name_ref()
+                                .map(|n| n.text().to_string())
+                                .or_else(|| field.index_token().map(|t| t.text().to_string()))
+                                .and_then(|s| s.parse::<usize>().ok())
+                        {
+                            positions.insert(index);
+                        }
+                        break;
+                    }
+                    _ => None,
+                };
             }
         }
     }
@@ -1368,4 +1358,8 @@ pub(crate) fn fields(source: &Source, location: &Location, name: &str) -> Result
                 .ok_or_else(|| "binding refers to a missing tuple field".into())
         })
         .collect()
+}
+
+fn binding_name(pattern: ast::Pat, name: &str) -> bool {
+    matches!(pattern, ast::Pat::IdentPat(p) if p.pat().is_none() && p.name().is_some_and(|n|ident(n.text())==ident(name)))
 }
