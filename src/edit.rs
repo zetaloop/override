@@ -5,6 +5,7 @@ use ra_ap_syntax::{
     ast::{
         self, HasGenericArgs, HasGenericParams, HasName, HasVisibility, edit::AstNodeEdit, make,
     },
+    match_ast,
     syntax_editor::{Position, Removable, SyntaxEditor},
 };
 
@@ -1208,13 +1209,18 @@ fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast:
         expression
     };
     let replacement = fragment::indent(expression.syntax(), &fragment::indentation(node));
-    if !expression.is_block_like()
-        && node
-            .parent()
-            .and_then(ast::ExprStmt::cast)
-            .is_some_and(|s| s.semicolon_token().is_none())
-    {
-        editor.replace_with_many(node, vec![replacement.into(), make::token(T![;]).into()]);
+    let separator = node.parent().and_then(|parent| match_ast! {
+        match parent {
+            ast::ExprStmt(stmt) => stmt.semicolon_token().is_none().then_some(T![;]),
+            ast::MatchArm(arm) => (arm.comma_token().is_none() && arm.syntax().next_sibling().is_some()).then_some(T![,]),
+            _ => None,
+        }
+    });
+    if let Some(separator) = separator.filter(|_| !expression.is_block_like()) {
+        editor.replace_with_many(
+            node,
+            vec![replacement.into(), make::token(separator).into()],
+        );
     } else {
         editor.replace(node, replacement);
     }
