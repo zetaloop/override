@@ -23,6 +23,7 @@ enum Step {
     Argument(Parameter),
     Attribute(String),
     Body,
+    Value,
     Condition,
     Region(Boundary, Boundary),
     Has(Selector),
@@ -168,6 +169,9 @@ impl Selector {
     pub fn condition(self) -> Self {
         self.step(Step::Condition)
     }
+    pub fn value(self) -> Self {
+        self.step(Step::Value)
+    }
     pub fn region(self, start: Boundary, end: Boundary) -> Self {
         self.step(Step::Region(start, end))
     }
@@ -306,6 +310,9 @@ impl Selector {
                     Step::Body if scope.region.is_none() => {
                         next.extend(body(&scope.node).map(|node| scope.at(node)));
                     }
+                    Step::Value if scope.region.is_none() => {
+                        next.extend(value(&scope.node).map(|expr| scope.at(expr.syntax().clone())));
+                    }
                     Step::Condition if scope.region.is_none() => {
                         let condition = ast::IfExpr::cast(scope.node.clone())
                             .and_then(|node| node.condition())
@@ -321,6 +328,7 @@ impl Selector {
                     }
                     Step::Argument(_)
                     | Step::Body
+                    | Step::Value
                     | Step::Condition
                     | Step::Field(_)
                     | Step::Attribute(_) => {}
@@ -552,6 +560,18 @@ pub(crate) fn body(node: &ra_ap_syntax::SyntaxNode) -> Option<ra_ap_syntax::Synt
         ast::MatchArm::cast(node.clone())
             .and_then(|arm| arm.expr())
             .map(|body| body.syntax().clone())
+    }
+}
+
+pub(crate) fn value(node: &ra_ap_syntax::SyntaxNode) -> Option<ast::Expr> {
+    ra_ap_syntax::match_ast! {
+        match node {
+            ast::RecordExprField(field) => field.expr(),
+            ast::Const(item) => item.body(),
+            ast::Static(item) => item.body(),
+            ast::Variant(variant) => variant.const_arg()?.expr(),
+            _ => None,
+        }
     }
 }
 

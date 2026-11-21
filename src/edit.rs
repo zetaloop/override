@@ -518,38 +518,11 @@ impl Selected<'_> {
                 replace_expression(editor, node, expression);
                 return Ok(());
             }
+            if let Some(old) = crate::select::value(node) {
+                replace_expression(editor, old.syntax(), expression);
+                return Ok(());
+            }
             let expression = fragment::indent(expression.syntax(), &fragment::indentation(node));
-            if let Some(field) = ast::RecordExprField::cast(node.clone()) {
-                let old = field.expr().ok_or("field has no value")?;
-                if field.colon_token().is_some() {
-                    editor.replace(old.syntax(), &expression);
-                } else {
-                    let name = field.field_name().ok_or("field has no name")?;
-                    let original: SyntaxElement = old.syntax().clone().into();
-                    editor.replace_all(
-                        original.clone()..=original,
-                        vec![
-                            make::name_ref(name.text()).syntax().clone().into(),
-                            make::token(T![:]).into(),
-                            whitespace(" "),
-                            expression.clone().into(),
-                        ],
-                    );
-                }
-                return Ok(());
-            }
-            let value = ast::Const::cast(node.clone())
-                .and_then(|node| node.body())
-                .or_else(|| ast::Static::cast(node.clone()).and_then(|node| node.body()))
-                .or_else(|| {
-                    ast::Variant::cast(node.clone())
-                        .and_then(|node| node.const_arg())
-                        .and_then(|argument| argument.syntax().children().find_map(ast::Expr::cast))
-                });
-            if let Some(old) = value {
-                editor.replace(old.syntax(), &expression);
-                return Ok(());
-            }
             if matches!(
                 node.kind(),
                 SyntaxKind::CONST | SyntaxKind::STATIC | SyntaxKind::VARIANT
@@ -1209,6 +1182,21 @@ fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast:
         expression
     };
     let replacement = fragment::indent(expression.syntax(), &fragment::indentation(node));
+    if let Some(field) = node.parent().and_then(ast::RecordExprField::cast)
+        && field.colon_token().is_none()
+        && let Some(name) = field.field_name()
+    {
+        editor.replace_with_many(
+            node,
+            vec![
+                make::name_ref(name.text()).syntax().clone().into(),
+                make::token(T![:]).into(),
+                whitespace(" "),
+                replacement.into(),
+            ],
+        );
+        return;
+    }
     let separator = node.parent().and_then(|parent| match_ast! {
         match parent {
             ast::ExprStmt(stmt) => stmt.semicolon_token().is_none().then_some(T![;]),

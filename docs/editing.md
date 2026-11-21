@@ -192,6 +192,8 @@ source.select(item("run").while_loop())?.set_condition("self.ready()")?;
 
 `set_value` replaces a selected expression, or the value of a record field initializer, constant, static or enum discriminant. Selecting a condition with `condition()` and replacing it with `set_value` has the same effect as `set_condition` on the enclosing `if`, `while` or `for`.
 
+Use `value()` to select an existing initializer or discriminant as an expression. For example, `.field("workspaces").value()` followed by `.wrap("Arc::new(_)")` wraps the original field value, including when the initializer uses field shorthand.
+
 To let a destructuring pattern accept other fields, add `..`:
 
 ```rust
