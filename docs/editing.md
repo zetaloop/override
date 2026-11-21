@@ -98,7 +98,7 @@ source.add_source("runtime::shared", &shared);
 ```rust
 source
     .select(item("run").call("dispatch").argument("on_ready").closure())?
-    .delegate("decorate", &["context"])?;
+    .wrap("decorate(context, _)")?;
 ```
 
 For a function outside the available source, supply its declaration directly:
@@ -119,7 +119,7 @@ source
             .argument("on_ready")
             .closure(),
     )?
-    .delegate("decorate", &["context"])?;
+    .wrap("decorate(context, _)")?;
 ```
 
 `Source::declaration(query)` and `Selected::declaration()` take a declaration from parsed source instead. `declared_by` attaches such a declaration to a call or symbol query.
@@ -231,7 +231,7 @@ source
     .redirect("crate::support::calculate")?;
 ```
 
-Generic arguments on the call are kept unless the new target supplies its own. A method call can be redirected to another method name; to pass the receiver to a free function, use [delegation](#delegating-through-a-helper).
+Generic arguments on the call are kept unless the new target supplies its own. A method call can be redirected to another method name; to pass the receiver to a free function, use [`forward`](#forwarding-and-wrapping).
 
 To update every reference to a declaration in a scope, end the query with `symbol`:
 
@@ -247,19 +247,25 @@ A symbol selection covers the references and supports `redirect`. A declaration 
 
 ## Reusing upstream logic
 
-### Delegating through a helper
+### Forwarding and wrapping
 
-Delegation routes a call through a helper:
+Forward a call's receiver and arguments to a helper:
 
 ```rust
 source
     .select(item("Runtime::run").call("block_on"))?
-    .delegate("crate::support::block_on", &["context"])?;
+    .forward("crate::support::block_on", &["context"])?;
 ```
 
-The helper receives the context arguments first, then the original receiver if any, then the original arguments. Explicit generic arguments are passed to the helper.
+The helper receives the context arguments first, then the original receiver if any, then the original arguments. It inherits the call's generic arguments unless the helper path supplies its own.
 
-For a closure, the helper receives the closure after the context. A delegated function or region is first wrapped in a closure; async code is wrapped in an async block instead, and the helper call is awaited.
+`wrap` places the selected expression at `_` in a Rust expression. A function body or statement region fills the placeholder as a block:
+
+```rust
+source.select(call("register").argument("callback"))?.wrap("decorate(world, _)")?;
+source.select(item("read").body())?.wrap("with_lock(lock, || _)")?;
+source.select(item("load").body())?.wrap("timed(async { _ }).await")?;
+```
 
 For a region that returns from the surrounding function or breaks out of an enclosing loop, use [extraction with `control_flow()`](#carrying-control-flow).
 
@@ -276,7 +282,7 @@ let region = item("run").body().region(
 
 `before()` and `after()` refer to the edges of the selected object, including a statement's semicolon; for a binding, the edges of its `let` statement. `start()` and `end()` refer to the edges of the object's body or contents.
 
-Both boundary queries search the current scope and must each match one object. The region must cover complete syntax and form a valid Rust body for extraction or delegation.
+Both boundary queries search the current scope and must each match one object. The region must cover complete syntax and form a valid Rust body for extraction or wrapping.
 
 A region depends on code order: code added upstream between its boundaries becomes part of it. Selecting a whole function, loop or branch avoids this when one already covers the reused code.
 

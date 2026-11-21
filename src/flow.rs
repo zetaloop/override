@@ -296,27 +296,6 @@ impl Exits {
     }
 }
 
-pub(crate) fn check(
-    source: &Source,
-    location: &Location,
-    region: &[SyntaxElement],
-    tail: bool,
-) -> Result<()> {
-    if tail {
-        return Ok(());
-    }
-    let Exits { jumps, tries, .. } = Exits::collect(source, location, region, None)?;
-    if !jumps.is_empty() {
-        return Err(
-            "control flow leaves the selected region; enable control_flow for extraction".into(),
-        );
-    }
-    if !tries.is_empty() {
-        return Err("? leaves the selected region; enable propagate for extraction".into());
-    }
-    Ok(())
-}
-
 struct Exit {
     action: Action,
     target: Location,

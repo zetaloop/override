@@ -266,7 +266,7 @@ impl Selected<'_> {
         operation: impl FnOnce(&SyntaxEditor, &SyntaxNode, Edition) -> Result<T>,
     ) -> Result<T> {
         if self.location.region.is_some() {
-            return Err("a region supports extraction and delegation".into());
+            return Err("a region supports extraction and wrapping".into());
         }
         if self.location.symbol.is_some() {
             return Err("a symbol selection supports redirection".into());

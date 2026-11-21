@@ -1109,7 +1109,7 @@ fn references(source: &Source, scope: &Location, replacement: &ast::Path) -> Res
                 )?;
                 if !matches!(wanted.as_slice(),[binding] if method.is_some_and(|m|m.matches(&binding.declaration,binding.unresolved.as_deref(),name)))
                 {
-                    return Err(format!("`{call}` cannot call `{replacement}` by method name; use delegate for a qualified function").into());
+                    return Err(format!("`{call}` cannot call `{replacement}` by method name; use forward for a qualified function").into());
                 }
             }
             result.push(location.at(name.syntax().clone()));

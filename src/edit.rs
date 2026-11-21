@@ -709,7 +709,7 @@ impl Selected<'_> {
             let path = fragment::path(target, edition)?;
             if let Some(call) = ast::MethodCallExpr::cast(node.clone()) {
                 if path.qualifier().is_some() {
-                    return Err("use delegate to redirect a method to a qualified function".into());
+                    return Err("use forward to redirect a method to a qualified function".into());
                 }
                 let name = call.name_ref().ok_or("method call has no name")?;
                 let segment = path.segment();
@@ -825,135 +825,113 @@ impl Selected<'_> {
         })
     }
 
-    pub fn delegate(mut self, helper: &str, context: &[&str]) -> Result<()> {
-        let region = self.location.region.take();
-        let asynchronous = self
-            .location
-            .ancestors()
-            .into_iter()
-            .find_map(|ancestor| {
-                if let Some(function) = ast::Fn::cast(ancestor.clone()) {
-                    Some(function.async_token().is_some())
-                } else if let Some(closure) = ast::ClosureExpr::cast(ancestor.clone()) {
-                    Some(closure.async_token().is_some())
-                } else {
-                    ast::BlockExpr::cast(ancestor)
-                        .filter(|block| block.async_token().is_some())
-                        .map(|_| true)
-                }
-            })
-            .unwrap_or(false);
-        let location = self.location.clone();
-        if let Some(region) = &region {
-            flow::check(
-                self.source,
-                &location,
-                region,
-                region::tail(&location.node, region),
-            )?;
-        }
+    pub fn forward(self, helper: &str, context: &[&str]) -> Result<()> {
         self.edit(|editor, node, edition| {
             let helper = fragment::path(helper, edition)?;
             let mut inputs = context
                 .iter()
                 .map(|text| fragment::expression(text, edition))
                 .collect::<Result<Vec<_>>>()?;
-            if region.is_none()
-                && let Some(arguments) = arguments(node)
-            {
-                let generics = if let Some(method) = ast::MethodCallExpr::cast(node.clone()) {
-                    inputs.push(method.receiver().ok_or("method call has no receiver")?);
-                    method.generic_arg_list()
-                } else {
-                    ast::CallExpr::cast(node.clone())
-                        .and_then(|call| call.expr())
-                        .and_then(|expression| match expression {
-                            ast::Expr::PathExpr(path) => path.path(),
-                            _ => None,
-                        })
-                        .and_then(|path| path.segment())
-                        .and_then(|segment| segment.generic_arg_list())
-                };
-                inputs.extend(arguments.args());
-                let helper = if let Some(generics) = generics {
-                    fragment::expression(
-                        &format!("{}{}", helper.syntax(), generics.syntax()),
-                        edition,
-                    )?
-                } else {
-                    make::expr_path(helper)
-                };
-                editor.replace(
-                    node,
-                    make::expr_call(helper, make::arg_list(inputs)).syntax(),
-                );
-            } else if region.is_none()
-                && let Some(closure) = ast::ClosureExpr::cast(node.clone())
-            {
-                inputs.push(ast::Expr::ClosureExpr(closure));
-                editor.replace(
-                    node,
-                    make::expr_call(make::expr_path(helper), make::arg_list(inputs)).syntax(),
-                );
-            } else if region.is_some() || ast::Fn::can_cast(node.kind()) {
-                let contents = if let Some(region) = &region {
-                    fragment::block(region, edition)?.to_string()
-                } else {
-                    ast::Fn::cast(node.clone())
-                        .and_then(|function| function.body())
-                        .ok_or("function has no body")?
-                        .reset_indent()
-                        .syntax()
-                        .to_string()
-                };
-                let wrapped = if asynchronous {
-                    format!("async {contents}")
-                } else {
-                    format!("|| {contents}")
-                };
-                inputs.push(fragment::expression(&wrapped, edition)?);
-                let call: ast::Expr =
-                    make::expr_call(make::expr_path(helper), make::arg_list(inputs)).into();
-                let call = if asynchronous {
-                    make::expr_await(call)
-                } else {
-                    call
-                };
-                if let Some(region) = region {
-                    let first = region
-                        .iter()
-                        .find(|element| element.kind() != SyntaxKind::WHITESPACE)
-                        .ok_or("selected region is empty")?;
-                    let last = region
-                        .iter()
-                        .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
-                        .ok_or("selected region is empty")?;
-                    let replacement = if region::expression(node, &region) {
-                        call.syntax().clone()
-                    } else {
-                        make::expr_stmt(call).syntax().clone()
-                    };
-                    let indentation = first
-                        .as_node()
-                        .map(fragment::indentation)
-                        .unwrap_or_else(|| fragment::indentation(node));
-                    editor.replace_all(
-                        first.clone()..=last.clone(),
-                        vec![fragment::indent(&replacement, &indentation).into()],
-                    );
-                } else {
-                    let body = ast::Fn::cast(node.clone())
-                        .and_then(|function| function.body())
-                        .ok_or("function has no body")?;
-                    let replacement = make::block_expr(
-                        std::iter::empty(),
-                        Some(call.indent(ast::edit::IndentLevel(1))),
-                    )
-                    .indent(body.indent_level());
-                    editor.replace(body.syntax(), replacement.syntax());
-                }
+            let arguments = arguments(node).ok_or("forward requires a call")?;
+            let generics = if let Some(method) = ast::MethodCallExpr::cast(node.clone()) {
+                inputs.push(method.receiver().ok_or("method call has no receiver")?);
+                method.generic_arg_list()
             } else {
-                return Err("delegation requires a call, closure or function".into());
+                ast::CallExpr::cast(node.clone())
+                    .and_then(|call| call.expr())
+                    .and_then(|expression| match expression {
+                        ast::Expr::PathExpr(path) => path.path(),
+                        _ => None,
+                    })
+                    .and_then(|path| path.segment())
+                    .and_then(|segment| segment.generic_arg_list())
+            };
+            inputs.extend(arguments.args());
+            let helper = if let Some(generics) = generics
+                && helper
+                    .segment()
+                    .is_none_or(|s| s.generic_arg_list().is_none())
+            {
+                fragment::expression(
+                    &format!("{}{}", helper.syntax(), generics.syntax()),
+                    edition,
+                )?
+            } else {
+                make::expr_path(helper)
+            };
+            editor.replace(
+                node,
+                make::expr_call(helper, make::arg_list(inputs)).syntax(),
+            );
+            Ok(())
+        })
+    }
+
+    pub fn wrap(mut self, template: &str) -> Result<()> {
+        let region = self.location.region.take();
+        let location = &self.location;
+        let edition = self.source.edition;
+        let template = fragment::expression(template, edition)?;
+        let (wrapper, template) = SyntaxEditor::with_ast_node(&template);
+        let hole = fragment::one::<ast::UnderscoreExpr>(template.syntax())
+            .map_err(|_| "wrapper requires one expression placeholder `_`")?;
+        let block = region
+            .is_none()
+            .then(|| {
+                ast::Fn::cast(location.node.clone())
+                    .and_then(|f| f.body())
+                    .or_else(|| {
+                        ast::BlockExpr::cast(location.node.clone())
+                            .filter(|b| b.modifier().is_none())
+                    })
+            })
+            .flatten();
+        let original = if let Some(region) = &region {
+            fragment::block(region, edition)?
+        } else if let Some(block) = &block {
+            ast::Expr::BlockExpr(block.reset_indent())
+        } else {
+            ast::Expr::cast(location.node.clone())
+                .ok_or("wrap requires an expression, function body or region")?
+        };
+        if hole.syntax() == template.syntax() {
+            return self.edit(|_, _, _| Ok(()));
+        }
+        replace_expression(&wrapper, hole.syntax(), original);
+        let wrapped = ast::Expr::cast(wrapper.finish().new_root().clone())
+            .ok_or("wrapper is not an expression")?;
+        self.edit(|editor, node, _| {
+            if let Some(region) = region {
+                let first = region
+                    .iter()
+                    .find(|element| element.kind() != SyntaxKind::WHITESPACE)
+                    .ok_or("selected region is empty")?;
+                let last = region
+                    .iter()
+                    .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
+                    .ok_or("selected region is empty")?;
+                let replacement = if region::expression(node, &region) {
+                    wrapped.syntax().clone()
+                } else {
+                    make::expr_stmt(wrapped).syntax().clone()
+                };
+                let indentation = first
+                    .as_node()
+                    .map(fragment::indentation)
+                    .unwrap_or_else(|| fragment::indentation(node));
+                editor.replace_all(
+                    first.clone()..=last.clone(),
+                    vec![fragment::indent(&replacement, &indentation).into()],
+                );
+            } else if let Some(body) = block {
+                let replacement = make::block_expr(
+                    std::iter::empty(),
+                    Some(wrapped.indent(ast::edit::IndentLevel(1))),
+                )
+                .indent(body.indent_level());
+                editor.replace(body.syntax(), replacement.syntax());
+            } else {
+                replace_expression(editor, node, wrapped);
             }
             Ok(())
         })
@@ -1229,10 +1207,17 @@ fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast:
     } else {
         expression
     };
-    editor.replace(
-        node,
-        fragment::indent(expression.syntax(), &fragment::indentation(node)),
-    );
+    let replacement = fragment::indent(expression.syntax(), &fragment::indentation(node));
+    if !expression.is_block_like()
+        && node
+            .parent()
+            .and_then(ast::ExprStmt::cast)
+            .is_some_and(|s| s.semicolon_token().is_none())
+    {
+        editor.replace_with_many(node, vec![replacement.into(), make::token(T![;]).into()]);
+    } else {
+        editor.replace(node, replacement);
+    }
 }
 
 fn remove_node(editor: &SyntaxEditor, node: &SyntaxNode) {
