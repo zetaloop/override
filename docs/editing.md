@@ -172,6 +172,7 @@ source.select(item("run"))?.add_attribute("#[inline]")?;
 | `add_parameter("context: &Context")` | Adds a function or closure parameter |
 | `add_generic("T: Send")` | Adds a generic parameter |
 | `set_bounds("Send + Sync")` | Sets bounds on a parameter, trait or type alias |
+| `add_bound("Sync")` | Appends a bound to the existing list |
 | `set_where_clause("where T: Clone")` | Sets the where clause; `""` removes it |
 | `set_type("u64")` | Replaces a selected type or an object's declared type |
 | `set_return_type("Result<()>")` | Changes a function's return type |

@@ -358,6 +358,27 @@ impl Selected<'_> {
         })
     }
 
+    pub fn add_bound(self, bound: &str) -> Result<()> {
+        let signature = fragment::signature(&format!("fn f<T: {bound}>()"), self.source.edition)?;
+        let bound = fragment::one::<ast::TypeBound>(signature.syntax())?;
+        if let Some(old) = self
+            .location
+            .node
+            .children()
+            .find_map(ast::TypeBoundList::cast)
+            && old.bounds().next().is_some()
+        {
+            let separator = if old.syntax().last_token().is_some_and(|t| t.kind() == T![+]) {
+                " "
+            } else {
+                " + "
+            };
+            self.set_bounds(&format!("{old}{separator}{bound}"))
+        } else {
+            self.set_bounds(&bound.to_string())
+        }
+    }
+
     pub fn set_bounds(self, bounds: &str) -> Result<()> {
         self.edit(|editor, node, edition| {
             let signature = fragment::signature(&format!("fn f<T: {bounds}>()"), edition)?;
