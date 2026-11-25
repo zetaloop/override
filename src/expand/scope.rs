@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Source, source::Location};
+use crate::{Result as EditResult, Source, source::Location};
 use base_db::{
     CrateGraphBuilder, CrateOrigin, CrateWorkspaceData, CratesMap, FileChange, FileId, FileSet,
     FileSourceRootInput, FileText, Files, Nonce, SourceDatabase, SourceRoot, SourceRootId,
@@ -8,7 +8,11 @@ use base_db::{
 };
 use hir_def::{
     AssocItemId, DefWithBodyId, Lookup, ModuleDefId,
-    expr_store::{Body, HygieneId, path::Path, scope::ExprScopes},
+    expr_store::{
+        Body, HygieneId,
+        path::Path,
+        scope::{ExprScopes, ScopeId},
+    },
     hir::{Expr, ExprId},
     item_scope::ImportOrGlob,
     nameres::{block_def_map, crate_def_map},
@@ -158,7 +162,11 @@ impl Scope {
         );
         change.set_crate_graph(graph);
         let krate = change.apply(&mut db)?[&krate];
-        for (_, m) in crate_def_map(&db, krate).modules() {
+        let mut modules = crate_def_map(&db, krate)
+            .modules()
+            .map(|(_, m)| m)
+            .collect::<Vec<_>>();
+        while let Some(m) = modules.pop() {
             let mut functions = Vec::new();
             let mut associated = |items: &[(Name, AssocItemId)]| {
                 functions.extend(items.iter().filter_map(|(_, a)| {
@@ -190,8 +198,18 @@ impl Scope {
                     .file_id
                     .file_id()
                     .is_some_and(|id| id.file_id(&db) == FileId::from_raw(0))
-                    && loc.value.syntax().text_range() == owner.range()
                 {
+                    let range = loc.value.syntax().text_range();
+                    if range != owner.range() {
+                        if range.contains_range(owner.range()) {
+                            modules.extend(
+                                Body::of(&db, f.into())
+                                    .blocks(&db)
+                                    .flat_map(|(_, map)| map.modules().map(|(_, m)| m)),
+                            );
+                        }
+                        continue;
+                    }
                     let owner = f.into();
                     let (body, map) = Body::with_source_map(&db, owner);
                     let expressions = body
@@ -231,14 +249,13 @@ impl Scope {
         }
     }
 
-    fn value(&self, at: TextRange, name: &str) -> Option<Value> {
+    fn resolve(&self, at: TextRange, name: &Name) -> Option<(ValueNs, Option<ScopeId>)> {
         let db = &self.db;
         let body = Body::of(db, self.owner);
         let scopes = ExprScopes::of(db, self.owner);
-        let name = Name::new_root(name.trim_start_matches("r#"));
         let (id,_,exact)=self.expressions.iter().filter_map(|&(r,id)|{
             if !r.contains_range(at){return None}
-            let exact=matches!(&body[id],Expr::Path(p) if p.mod_path().is_some_and(|p|p.segments()==std::slice::from_ref(&name)));
+            let exact=matches!(&body[id],Expr::Path(p) if p.mod_path().is_some_and(|p|p.segments()==std::slice::from_ref(name)));
             Some((id,r.len(),exact))
         }).min_by_key(|(_,len,exact)|(!exact,*len))?;
         let scope = scopes.scope_for(id);
@@ -252,9 +269,107 @@ impl Scope {
         } else {
             HygieneId::ROOT
         };
-        match resolver.resolve_path_in_value_ns(db, &path, hygiene)? {
-            ResolveValueResult::ValueNs(ValueNs::LocalBinding(_)) => Some(Value::Local),
-            ResolveValueResult::ValueNs(value) => {
+        let ResolveValueResult::ValueNs(value) =
+            resolver.resolve_path_in_value_ns(db, &path, hygiene)?
+        else {
+            return None;
+        };
+        Some((value, scope))
+    }
+
+    pub fn block_call(
+        source: &Source,
+        caller: &Location,
+        at: TextRange,
+        name: &str,
+        helper: TextRange,
+        calls: &[Location],
+    ) -> EditResult<Option<(&'static str, TextRange)>> {
+        let scope = Self::new(source, caller).ok_or_else(|| {
+            format!("cannot resolve `{name}` in the enclosing function after macro expansion")
+        })?;
+        let db = &scope.db;
+        let (_, map) = Body::with_source_map(db, scope.owner);
+        let file = base_db::EditionedFileId::new(db, FileId::from_raw(0), source.edition());
+        let mut macros = super::Macros::default();
+        for site in calls {
+            let mut pending = vec![InFile::new(
+                file.into(),
+                ast::MacroCall::cast(site.node.clone()).unwrap(),
+            )];
+            while let Some(call) = pending.pop() {
+                if let Some(id) = map.expansion(call.as_ref()) {
+                    let file = hir_expand::HirFileId::from(id);
+                    pending.extend(
+                        file.parse_or_expand(db)
+                            .children()
+                            .filter_map(crate::symbol::statement_macro)
+                            .map(|m| InFile::new(file, m)),
+                    );
+                } else if macros.exposes_declarations(source, 0, site, &call.value)? {
+                    return Err(format!("cannot resolve declarations from `{}` at {:?} for block-local function `{name}`",call.value,site.range()).into());
+                }
+            }
+        }
+        let (resolved, _) = scope
+            .resolve(at, &Name::new_root(name.trim_start_matches("r#")))
+            .ok_or_else(|| {
+                format!("cannot resolve block-local call to `{name}` after macro expansion")
+            })?;
+        if let ValueNs::LocalBinding(b) = resolved {
+            let pat = map
+                .patterns_for_binding(b)
+                .iter()
+                .find_map(|&p| map.pat_syntax(p).ok())
+                .ok_or("macro binding has no source position")?;
+            let tree = pat.value.to_node(&pat.file_id.parse_or_expand(db));
+            return Ok(Some((
+                "binding",
+                InFile::new(pat.file_id, tree.syntax())
+                    .original_file_range_with_macro_call_input(db)
+                    .range,
+            )));
+        }
+        if let ValueNs::FunctionId(f) = resolved {
+            let src = f.lookup(db).source(db);
+            if src
+                .file_id
+                .file_id()
+                .is_some_and(|id| id.file_id(db) == FileId::from_raw(0))
+                && src.value.syntax().text_range() == helper
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(Value::Import(_, range)) = scope.value(at, name) {
+            return Ok(Some(("import", range)));
+        }
+        let decl = match resolved {
+            ValueNs::FunctionId(f) => f.lookup(db).source(db).map(|n| n.syntax().clone()),
+            ValueNs::ConstId(c) => c.lookup(db).source(db).map(|n| n.syntax().clone()),
+            ValueNs::StaticId(s) => s.lookup(db).source(db).map(|n| n.syntax().clone()),
+            ValueNs::StructId(s) => s.lookup(db).source(db).map(|n| n.syntax().clone()),
+            _ => {
+                return Err(format!(
+                    "`{name}` does not resolve to the extracted block-local function"
+                )
+                .into());
+            }
+        };
+        let range = decl
+            .file_id
+            .original_call_node(db)
+            .map_or_else(|| decl.value.text_range(), |s| s.value.text_range());
+        Ok(Some(("declaration", range)))
+    }
+
+    fn value(&self, at: TextRange, name: &str) -> Option<Value> {
+        let db = &self.db;
+        let name = Name::new_root(name.trim_start_matches("r#"));
+        let (value, scope) = self.resolve(at, &name)?;
+        match value {
+            ValueNs::LocalBinding(_) => Some(Value::Local),
+            value => {
                 let def = match value {
                     ValueNs::FunctionId(f) => ModuleDefId::FunctionId(f),
                     ValueNs::ConstId(c) => ModuleDefId::ConstId(c),
@@ -263,6 +378,7 @@ impl Scope {
                     ValueNs::EnumVariantId(v) => ModuleDefId::EnumVariantId(v),
                     _ => return None,
                 };
+                let scopes = ExprScopes::of(db, self.owner);
                 for scope in scopes.scope_chain(scope) {
                     let Some(block) = scopes.block(scope) else {
                         continue;
@@ -288,7 +404,6 @@ impl Scope {
                 }
                 None
             }
-            _ => None,
         }
     }
 }

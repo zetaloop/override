@@ -949,6 +949,64 @@ pub(crate) fn catch_all(source: &Source, scope: &Location, pattern: &ast::Pat) -
     }
 }
 
+pub(crate) fn statement_macro(node: SyntaxNode) -> Option<ast::MacroCall> {
+    if let Some(call) = ast::MacroCall::cast(node.clone()) {
+        return Some(call);
+    }
+    let expr = ast::ExprStmt::cast(node.clone())
+        .and_then(|s| s.expr())
+        .or_else(|| ast::Expr::cast(node))?;
+    if let ast::Expr::MacroExpr(m) = expr {
+        m.macro_call()
+    } else {
+        None
+    }
+}
+
+pub(crate) fn shadow(
+    definitions: &[Location],
+    site: &Location,
+    function: &Location,
+    name: &str,
+) -> Option<(&'static str, Location)> {
+    for binding in lookup(
+        definitions,
+        site,
+        name,
+        Some(Namespace::Value),
+        &mut HashSet::new(),
+    ) {
+        if let Some(import) = binding.imports.iter().find(|i| {
+            function.contains(&i.leaf)
+                && (binding.unresolved.is_none()
+                    || ast::UseTree::cast(i.leaf.node.clone())
+                        .is_some_and(|u| u.star_token().is_none()))
+        }) {
+            return Some(("import", import.leaf.clone()));
+        }
+        let d = binding.declaration;
+        if binding.unresolved.is_none() && function.contains(&d) {
+            let kind = if d
+                .ancestors()
+                .into_iter()
+                .any(|n| ast::Param::can_cast(n.kind()))
+            {
+                "parameter"
+            } else if ast::Fn::can_cast(d.node.kind()) {
+                "function"
+            } else {
+                "binding"
+            };
+            let ident = d.node.children().find_map(ast::Name::cast);
+            return Some((
+                kind,
+                ident.map_or_else(|| d.clone(), |n| d.at(n.syntax().clone())),
+            ));
+        }
+    }
+    None
+}
+
 pub(crate) fn binding(
     definitions: &[Location],
     context: &Location,

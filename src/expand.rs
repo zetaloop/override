@@ -416,6 +416,31 @@ impl Macros {
         Ok((self.views.len(), root))
     }
 
+    fn exposes_declarations(
+        &mut self,
+        source: &Source,
+        parent: usize,
+        site: &Location,
+        call: &ast::MacroCall,
+    ) -> Result<bool> {
+        let (view, root) = self.expand(source, parent, site, call, None)?;
+        for n in root.children() {
+            if let Some(call) = crate::symbol::statement_macro(n.clone()) {
+                if self.exposes_declarations(
+                    source,
+                    view,
+                    &site.at(call.syntax().clone()),
+                    &call,
+                )? {
+                    return Ok(true);
+                }
+            } else if ast::LetStmt::can_cast(n.kind()) || ast::Item::can_cast(n.kind()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn declarative(&self, definition: &Location) -> Result<Rule> {
         let origin = Origin {
             file: DEFINITION,

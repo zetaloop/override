@@ -374,7 +374,7 @@ impl Location {
         }
     }
 
-    fn offset(&self) -> TextSize {
+    pub(crate) fn offset(&self) -> TextSize {
         self.parents
             .iter()
             .map(|frame| {

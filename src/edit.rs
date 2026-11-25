@@ -949,7 +949,7 @@ impl Selected<'_> {
         let selected_region = self.location.region.take();
         let location = self.location.clone();
         let mut source = self.source.clone();
-        let (generated, declaration) = Selected {
+        let (generated, declaration, local_call) = Selected {
             source: &mut source,
             location: self.location,
             flow: flow::Options::default(),
@@ -962,46 +962,59 @@ impl Selected<'_> {
             let node = &target;
             let generated = fragment::signature(signature, edition)?;
             let name = generated.name().ok_or("extracted function has no name")?;
-            let params = generated
-                .param_list()
-                .ok_or("extracted function has no parameters")?;
-            let inputs = arguments
-                .iter()
-                .map(|text| fragment::expression(text, edition))
-                .collect::<Result<Vec<_>>>()?;
-            let call: ast::Expr = if params.self_param().is_some() {
-                make::expr_method_call(
-                    fragment::expression("self", edition)?,
-                    make::name_ref(name.text()),
-                    make::arg_list(inputs),
-                )
-                .into()
-            } else {
-                let associated = location
-                    .at(function.syntax().clone())
-                    .ancestors()
-                    .into_iter()
-                    .skip(1)
-                    .find(|node| {
-                        matches!(
-                            node.kind(),
-                            SyntaxKind::ASSOC_ITEM_LIST
-                                | SyntaxKind::ITEM_LIST
-                                | SyntaxKind::STMT_LIST
-                        )
-                    })
-                    .is_some_and(|node| node.kind() == SyntaxKind::ASSOC_ITEM_LIST);
-                let path = if associated {
-                    format!("Self::{}", name.text())
+            let container = location
+                .at(function.syntax().clone())
+                .ancestors()
+                .into_iter()
+                .skip(1)
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::ASSOC_ITEM_LIST | SyntaxKind::ITEM_LIST | SyntaxKind::STMT_LIST
+                    )
+                });
+            let block_local = container
+                .as_ref()
+                .is_some_and(|n| ast::StmtList::can_cast(n.kind()));
+            let path = if block_local {
+                name.to_string()
+            } else if let Some(owner) = container
+                .filter(|n| ast::AssocItemList::can_cast(n.kind()))
+                .and_then(|n| n.parent())
+            {
+                let trait_ = if let Some(t) = ast::Trait::cast(owner.clone()) {
+                    let prefix = if owner
+                        .parent()
+                        .is_some_and(|p| ast::StmtList::can_cast(p.kind()))
+                    {
+                        ""
+                    } else {
+                        "self::"
+                    };
+                    let args = t
+                        .generic_param_list()
+                        .map(|p| p.to_generic_args(editor.make()).to_string())
+                        .unwrap_or_default();
+                    Some(format!(
+                        "{prefix}{}{args}",
+                        t.name().ok_or("trait has no name")?
+                    ))
                 } else {
-                    name.text().to_owned()
+                    ast::Impl::cast(owner.clone())
+                        .and_then(|i| i.trait_())
+                        .map(|t| {
+                            resolve::type_text(self.source, &location.at(owner), t.syntax(), &[])
+                        })
                 };
-                make::expr_call(
-                    make::expr_path(fragment::path(&path, edition)?),
-                    make::arg_list(inputs),
+                trait_.map_or_else(
+                    || format!("Self::{name}"),
+                    |t| format!("<Self as {t}>::{name}"),
                 )
-                .into()
+            } else {
+                format!("self::{name}")
             };
+            let call = extraction_call(&location, &function, &generated, &path, arguments)?;
+            let dot = matches!(call, ast::Expr::MethodCallExpr(_));
             let call = if generated.async_token().is_some() {
                 make::expr_await(call)
             } else {
@@ -1087,11 +1100,25 @@ impl Selected<'_> {
                 .cloned()
                 .and_then(ast::Expr::cast)
                 .and_then(|expr| separator(last.as_node()?, &expr));
+            let start = location.offset() + first.text_range().start();
+            let local_call = (dot || block_local).then(|| {
+                let root = replacement.as_node().unwrap();
+                let kind = if dot {
+                    SyntaxKind::METHOD_CALL_EXPR
+                } else {
+                    SyntaxKind::CALL_EXPR
+                };
+                let call = root.descendants().find(|n| n.kind() == kind).unwrap();
+                (
+                    start + (call.text_range().start() - root.text_range().start()),
+                    kind,
+                )
+            });
             let replacements = std::iter::once(replacement)
                 .chain(separator.map(Into::into))
                 .collect();
             editor.replace_all(first.clone()..=last.clone(), replacements);
-            Ok((generated, transformed.declaration))
+            Ok((generated, transformed.declaration, local_call))
         })?;
         let mut root = Location::root(source.root.clone(), source.edition);
         root.module = source.module.clone();
@@ -1138,6 +1165,19 @@ impl Selected<'_> {
                 Some(&position),
             )
         })?;
+        if let Some((start, kind)) = local_call {
+            let site = source
+                .roots()
+                .next()
+                .unwrap()
+                .find_at(start, &|n| n.kind() == kind)
+                .ok_or("generated call has no source location")?;
+            check_extraction_call(
+                &source,
+                &site,
+                anchor + function.syntax().text_range().len(),
+            )?;
+        }
         if let Some(declaration) = declaration {
             let owner = owner.ok_or("extracted control-flow type has no declaration scope")?;
             let mut root = Location::root(source.root.clone(), source.edition);
@@ -1174,6 +1214,145 @@ impl Selected<'_> {
         *self.source = source;
         Ok(())
     }
+}
+
+fn extraction_call(
+    site: &Location,
+    function: &ast::Fn,
+    helper: &ast::Fn,
+    path: &str,
+    arguments: &[&str],
+) -> Result<ast::Expr> {
+    use ast::SelfParamKind::{MutRef, Owned, Ref};
+    let mut inputs = arguments
+        .iter()
+        .map(|s| fragment::expression(s, site.edition))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(target) = helper.param_list().and_then(|p| p.self_param()) {
+        let kind = |p: ast::SelfParam| match p.ty() {
+            None => Some(p.kind()),
+            Some(t) if fragment::spelling(t.syntax()) == "Self" => Some(Owned),
+            Some(ast::Type::RefType(r))
+                if r.ty()
+                    .is_some_and(|t| fragment::spelling(t.syntax()) == "Self") =>
+            {
+                Some(if r.mut_token().is_some() { MutRef } else { Ref })
+            }
+            _ => None,
+        };
+        let caller = function
+            .param_list()
+            .and_then(|p| p.self_param())
+            .and_then(kind);
+        let receiver = match (caller, kind(target)) {
+            (Some(Owned), Some(MutRef))
+                if inputs.iter().any(|e| {
+                    e.syntax().descendants().any(|n| {
+                        ast::MacroCall::can_cast(n.kind())
+                            || ast::PathExpr::cast(n).is_some_and(|e| {
+                                e.path().is_some_and(|p| resolve::path_name(&p) == "self")
+                            })
+                    })
+                }) =>
+            {
+                None
+            }
+            (Some(Owned), Some(MutRef)) => Some("&mut self"),
+            (Some(Owned), Some(Ref)) => Some("&self"),
+            (Some(Ref | MutRef), Some(Owned)) => Some("*self"),
+            (Some(_), Some(_)) => Some("self"),
+            _ => None,
+        };
+        if let Some(receiver) = receiver {
+            inputs.insert(0, fragment::expression(receiver, site.edition)?);
+        } else {
+            // Dot syntax retains rustc's receiver adjustments and two-phase borrow.
+            return Ok(make::expr_method_call(
+                fragment::expression("self", site.edition)?,
+                make::name_ref(helper.name().ok_or("extracted method has no name")?.text()),
+                make::arg_list(inputs),
+            )
+            .into());
+        }
+    }
+    Ok(make::expr_call(
+        make::expr_path(fragment::path(path, site.edition)?),
+        make::arg_list(inputs),
+    )
+    .into())
+}
+
+fn check_extraction_call(
+    source: &crate::Source,
+    site: &Location,
+    original_end: ra_ap_syntax::TextSize,
+) -> Result<()> {
+    let function = site
+        .ancestors()
+        .into_iter()
+        .find_map(ast::Fn::cast)
+        .ok_or("generated call has no enclosing function")?;
+    let function = site.at(function.syntax().clone());
+    let helper = function
+        .node
+        .next_sibling()
+        .and_then(ast::Fn::cast)
+        .ok_or("extracted function has no declaration")?;
+    let name = helper.name().ok_or("extracted function has no name")?;
+    let defs = resolve::declarations(source)
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect::<Vec<_>>();
+    if let Some(call) = ast::MethodCallExpr::cast(site.node.clone()) {
+        if let Some(method) =
+            resolve::method::resolve(&defs, site, std::iter::empty(), &call, name.text(), None)?
+            && !method.matches(&site.at(helper.syntax().clone()), None, name.text())
+            && let Some(decl) = method.declaration
+        {
+            return Err(format!(
+                "`{call}` calls `{}` instead of the extracted method `{name}`",
+                resolve::qualified(&decl)
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    let calls = site
+        .ancestors()
+        .into_iter()
+        .take_while(|n| n != &function.node)
+        .filter(|n| ast::StmtList::can_cast(n.kind()))
+        .flat_map(|l| l.children())
+        .filter_map(crate::symbol::statement_macro)
+        .map(|m| site.at(m.syntax().clone()))
+        .collect::<Vec<_>>();
+    let shadow = if calls.is_empty() {
+        crate::symbol::shadow(&defs, site, &function, name.text())
+            .map(|(kind, d)| (kind, d.range()))
+    } else {
+        let target = ast::CallExpr::cast(site.node.clone())
+            .and_then(|c| c.expr())
+            .ok_or("extracted call has no target")?;
+        crate::expand::Scope::block_call(
+            source,
+            &function,
+            site.at(target.syntax().clone()).range(),
+            name.text(),
+            site.at(helper.syntax().clone()).range(),
+            &calls,
+        )?
+    };
+    if let Some((kind, mut range)) = shadow {
+        if range.start() > site.range().start() && function.range().contains_range(range) {
+            let end = function.range().end();
+            range = ra_ap_syntax::TextRange::new(
+                original_end - (end - range.start()),
+                original_end - (end - range.end()),
+            );
+        }
+        return Err(format!("cannot call extracted block-local function `{name}`: {kind} `{name}` at {range:?} shadows it at the call site").into());
+    }
+    Ok(())
 }
 
 fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {

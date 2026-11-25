@@ -302,9 +302,9 @@ source
     )?;
 ```
 
-The signature defines the new helper, and `arguments` gives the expressions passed at the call site. A `self` receiver makes it a method call, so `arguments` covers only the remaining parameters.
+The signature defines the new helper, and `arguments` gives the expressions passed at the call site. For a helper with a `self` receiver, supply only the remaining arguments.
 
-The helper goes next to the original function, in the same `impl` or trait if there is one. An async signature makes the call awaited.
+The helper goes next to the original function, in the same `impl` or trait if there is one. For a block-local helper, choose a name visible at the call site. An async signature makes the call awaited.
 
 When the selected code relies on a local `use`, `extract` brings the required name into the helper. This includes traits used through method calls. If the supplied source leaves the target of `b.score()` unclear, the patch can name the method before extracting the surrounding `if`:
 
