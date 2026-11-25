@@ -911,7 +911,7 @@ impl Selected<'_> {
                     .iter()
                     .rfind(|element| element.kind() != SyntaxKind::WHITESPACE)
                     .ok_or("selected region is empty")?;
-                let replacement = if region::expression(node, &region) {
+                let replacement = if region::expression(&region) || region::tail(&region) {
                     wrapped.syntax().clone()
                 } else {
                     make::expr_stmt(wrapped).syntax().clone()
@@ -960,11 +960,6 @@ impl Selected<'_> {
                 .and_then(|arm| arm.expr())
                 .map_or_else(|| node.clone(), |expression| expression.syntax().clone());
             let node = &target;
-            let closure_body = node
-                .parent()
-                .and_then(ast::ClosureExpr::cast)
-                .and_then(|closure| closure.body())
-                .is_some_and(|body| body.syntax() == node);
             let generated = fragment::signature(signature, edition)?;
             let name = generated.name().ok_or("extracted function has no name")?;
             let params = generated
@@ -1016,31 +1011,24 @@ impl Selected<'_> {
                 .body()
                 .and_then(|body| body.stmt_list())
                 .ok_or("function has no body")?;
-            let (region, tail, expression) = if let Some(region) = selected_region {
-                let tail = region::tail(node, &region);
-                let expression = region::expression(node, &region);
-                (region, tail, expression)
+            let region = if let Some(region) = selected_region {
+                region
             } else if node == function.syntax() {
-                (block_contents(&function_body)?, true, true)
+                block_contents(&function_body)?
             } else if let Some(block) = ast::BlockExpr::cast(node.clone())
                 && block.modifier().is_none()
             {
                 let list = block.stmt_list().ok_or("block has no statements")?;
-                let tail = closure_body
-                    || block.syntax() == function.body().ok_or("function has no body")?.syntax();
-                (
-                    block_contents(&list)?,
-                    tail,
-                    tail || list.tail_expr().is_some(),
-                )
+                block_contents(&list)?
             } else {
                 let statement = node
                     .parent()
                     .filter(|parent| ast::ExprStmt::can_cast(parent.kind()))
                     .unwrap_or_else(|| node.clone());
-                let expression = ast::Expr::can_cast(statement.kind());
-                (vec![statement.into()], closure_body, expression)
+                vec![statement.into()]
             };
+            let tail = region::tail(&region);
+            let expression = tail || region::expression(&region);
             let first = region
                 .iter()
                 .find(|element| element.kind() != SyntaxKind::WHITESPACE)
@@ -1094,7 +1082,15 @@ impl Selected<'_> {
             } else {
                 make::expr_stmt(call).syntax().clone().into()
             };
-            editor.replace_all(first.clone()..=last.clone(), vec![replacement]);
+            let separator = replacement
+                .as_node()
+                .cloned()
+                .and_then(ast::Expr::cast)
+                .and_then(|expr| separator(last.as_node()?, &expr));
+            let replacements = std::iter::once(replacement)
+                .chain(separator.map(Into::into))
+                .collect();
+            editor.replace_all(first.clone()..=last.clone(), replacements);
             Ok((generated, transformed.declaration))
         })?;
         let mut root = Location::root(source.root.clone(), source.edition);
@@ -1242,21 +1238,24 @@ fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast:
         );
         return;
     }
-    let separator = node.parent().and_then(|parent| match_ast! {
+    if let Some(separator) = separator(node, &expression) {
+        editor.replace_with_many(node, vec![replacement.into(), separator.into()]);
+    } else {
+        editor.replace(node, replacement);
+    }
+}
+
+fn separator(node: &SyntaxNode, expression: &ast::Expr) -> Option<ra_ap_syntax::SyntaxToken> {
+    if expression.is_block_like() {
+        return None;
+    }
+    node.parent().and_then(|parent| match_ast! {
         match parent {
             ast::ExprStmt(stmt) => stmt.semicolon_token().is_none().then_some(T![;]),
             ast::MatchArm(arm) => (arm.comma_token().is_none() && arm.syntax().next_sibling().is_some()).then_some(T![,]),
             _ => None,
         }
-    });
-    if let Some(separator) = separator.filter(|_| !expression.is_block_like()) {
-        editor.replace_with_many(
-            node,
-            vec![replacement.into(), make::token(separator).into()],
-        );
-    } else {
-        editor.replace(node, replacement);
-    }
+    }).map(make::token)
 }
 
 fn remove_node(editor: &SyntaxEditor, node: &SyntaxNode) {

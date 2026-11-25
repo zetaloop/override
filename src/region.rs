@@ -157,37 +157,61 @@ pub(crate) fn select(
     })
 }
 
-pub(crate) fn tail(container: &SyntaxNode, region: &[ra_ap_syntax::SyntaxElement]) -> bool {
-    let Some(last) = region.iter().rfind(|element| !element.kind().is_trivia()) else {
+pub(crate) fn tail(region: &[ra_ap_syntax::SyntaxElement]) -> bool {
+    let Some(mut node) = region
+        .iter()
+        .rfind(|e| !e.kind().is_trivia())
+        .and_then(|e| e.as_node())
+        .cloned()
+    else {
         return false;
     };
-    if ast::ClosureExpr::can_cast(container.kind()) {
-        return select::body(container).as_ref() == last.as_node();
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR => {
+                return select::body(&parent) == Some(node);
+            }
+            SyntaxKind::RETURN_EXPR => {
+                // A surrounding try block can receive `?` before the return takes effect.
+                return !parent
+                    .ancestors()
+                    .take_while(|n| {
+                        !matches!(n.kind(), SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR)
+                            && !ast::BlockExpr::cast(n.clone()).is_some_and(|b| {
+                                b.async_token().is_some() || b.gen_token().is_some()
+                            })
+                    })
+                    .any(|n| {
+                        ast::BlockExpr::cast(n).is_some_and(|b| b.try_block_modifier().is_some())
+                    });
+            }
+            SyntaxKind::STMT_LIST if parent.children().last().as_ref() == Some(&node) => (),
+            SyntaxKind::BLOCK_EXPR if ast::StmtList::can_cast(node.kind()) => {
+                let block = ast::BlockExpr::cast(parent.clone()).unwrap();
+                if block.async_token().is_some() || block.gen_token().is_some() {
+                    return true;
+                }
+                if block.try_block_modifier().is_some() {
+                    return false;
+                }
+            }
+            SyntaxKind::IF_EXPR
+                if ast::IfExpr::cast(parent.clone())
+                    .and_then(|e| e.condition())
+                    .is_some_and(|c| c.syntax() != &node) => {}
+            SyntaxKind::MATCH_ARM if select::body(&parent) == Some(node.clone()) => (),
+            SyntaxKind::MATCH_ARM_LIST | SyntaxKind::PAREN_EXPR => (),
+            SyntaxKind::MATCH_EXPR if ast::MatchArmList::can_cast(node.kind()) => (),
+            _ => return false,
+        }
+        node = parent;
     }
-    let Some(list) = ast::StmtList::cast(container.clone()) else {
-        return false;
-    };
-    let final_element = list
-        .syntax()
-        .children_with_tokens()
-        .filter(|element| !element.kind().is_trivia() && element.kind() != T!['}'])
-        .last();
-    if final_element.as_ref() != Some(last) {
-        return false;
-    }
-    let Some(block) = container.parent() else {
-        return false;
-    };
-    block.parent().is_some_and(|owner| {
-        matches!(owner.kind(), SyntaxKind::FN | SyntaxKind::CLOSURE_EXPR)
-            && select::body(&owner).as_ref() == Some(&block)
-    })
+    false
 }
 
-pub(crate) fn expression(container: &SyntaxNode, region: &[ra_ap_syntax::SyntaxElement]) -> bool {
-    tail(container, region)
-        || region
-            .iter()
-            .rfind(|element| !element.kind().is_trivia())
-            .is_some_and(|element| ast::Expr::can_cast(element.kind()))
+pub(crate) fn expression(region: &[ra_ap_syntax::SyntaxElement]) -> bool {
+    region
+        .iter()
+        .rfind(|element| !element.kind().is_trivia())
+        .is_some_and(|element| ast::Expr::can_cast(element.kind()))
 }
