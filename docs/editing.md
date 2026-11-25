@@ -124,6 +124,8 @@ source
 
 `Source::declaration(query)` and `Selected::declaration()` take a declaration from parsed source instead. `declared_by` attaches such a declaration to a call or symbol query.
 
+For conditional parameters, `argument` uses the attributes and order at the declaration and call site. A required last parameter still identifies the last argument when a preceding parameter is omitted. If the same argument could belong to two different parameters, the query reports the ambiguity.
+
 `argument("self")` selects `state` in `state.snapshot()` or `&state` in `State::snapshot(&state)`. Use `set_value` to replace either expression. When converting a method to an associated function, `remove` drops the receiver and qualifies the call with its owning type and trait. An already qualified call keeps its path.
 
 For `fn draw((x, y): (i32, i32))`, the call `draw(point)` has one argument. Select the parameter from the API source to replace that whole argument in the caller:

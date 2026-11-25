@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub(crate) mod method;
+mod parameters;
 
 pub(crate) fn ident(spelling: &str) -> &str {
     spelling.strip_prefix("r#").unwrap_or(spelling)
@@ -1038,21 +1039,28 @@ pub(crate) fn argument(
                 .args(),
         )
         .collect::<Vec<_>>();
-    if arguments.len() != params.len() {
-        return Err("call and declaration have different argument counts".into());
-    }
-    let mut matches=params.into_iter().zip(arguments).filter(|(p,_)|match parameter{
-        Parameter::Declaration(decl)=>*p==decl.location.node,
-        Parameter::Name(name) if ast::SelfParam::can_cast(p.kind())=>name=="self",
-        Parameter::Name(name)=>ast::Param::cast(p.clone()).and_then(|p|p.pat()).is_some_and(|pat|matches!(pat,ast::Pat::IdentPat(p) if p.pat().is_none() && p.name().is_some_and(|n|ident(n.text())==ident(name)))),
-    });
-    let found = matches
-        .next()
-        .map(|(_, expr)| location.at(expr.syntax().clone()));
-    if matches.next().is_some() {
-        return Err("argument selection matches several parameters".into());
-    }
-    Ok(found)
+    let selected = params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let matches = match parameter {
+                Parameter::Declaration(decl) => *p == decl.location.node,
+                Parameter::Name(name) => ast::Param::cast(p.clone())
+                    .and_then(|p| p.pat())
+                    .is_some_and(|p| binding_name(p, name)),
+            };
+            matches.then_some(i)
+        })
+        .collect::<Vec<_>>();
+    Ok(parameters::corresponding(
+        &params,
+        &arguments,
+        &selected,
+        source,
+        &declaration,
+        location,
+    )?
+    .map(|i| location.at(arguments[i].syntax().clone())))
 }
 
 fn nominal_types(source: &Source, usage: &Location, text: &str) -> Vec<Location> {
