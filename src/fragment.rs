@@ -1,25 +1,67 @@
 use ra_ap_syntax::{
-    AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, ast,
+    AstNode, Edition, NodeOrToken, Parse, SourceFile, SyntaxError, SyntaxKind, SyntaxNode,
+    SyntaxTreeBuilder, TextRange, TextSize, WalkEvent, ast,
     ast::{HasName, make},
     syntax_editor::SyntaxEditor,
 };
 
 use crate::Result;
 
-pub(crate) fn file(text: &str, edition: Edition) -> Result<SyntaxNode> {
-    let parsed = SourceFile::parse(text, edition);
-    if !parsed.errors().is_empty() {
-        return Err(format!("invalid Rust syntax: {:?}", parsed.errors()).into());
+fn parse<N: AstNode>(
+    text: &str,
+    parser: impl FnOnce(&str) -> Parse<N>,
+) -> std::result::Result<N, Vec<SyntaxError>> {
+    if !text.contains("\r\n") {
+        return parser(text).ok();
     }
-    Ok(parsed.syntax_node())
+    // Rust normalizes CRLF before lexing. Keep the tree in the caller's byte coordinates.
+    let removed: Vec<_> = text
+        .match_indices("\r\n")
+        .enumerate()
+        .map(|(n, (i, _))| i - n)
+        .collect();
+    let original = |offset: TextSize| {
+        let i = usize::from(offset);
+        i + removed.partition_point(|&cr| cr < i)
+    };
+    let root = parser(&text.replace("\r\n", "\n")).ok().map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|err| {
+                let range = err.range();
+                err.with_range(TextRange::new(
+                    TextSize::try_from(original(range.start())).unwrap(),
+                    TextSize::try_from(original(range.end())).unwrap(),
+                ))
+            })
+            .collect::<Vec<_>>()
+    })?;
+    let mut builder = SyntaxTreeBuilder::default();
+    let mut start = 0;
+    for event in root.syntax().preorder_with_tokens() {
+        match event {
+            WalkEvent::Enter(NodeOrToken::Node(n)) => builder.start_node(n.kind()),
+            WalkEvent::Leave(NodeOrToken::Node(_)) => builder.finish_node(),
+            WalkEvent::Enter(NodeOrToken::Token(t)) => {
+                let end = original(t.text_range().end());
+                builder.token(t.kind(), &text[start..end]);
+                start = end;
+            }
+            WalkEvent::Leave(NodeOrToken::Token(_)) => (),
+        }
+    }
+    Ok(N::cast(builder.finish().syntax_node()).unwrap())
+}
+
+pub(crate) fn file(text: &str, edition: Edition) -> Result<SyntaxNode> {
+    parse(text, |s| SourceFile::parse(s, edition))
+        .map(|f| f.syntax().clone())
+        .map_err(|errors| format!("invalid Rust syntax: {errors:?}").into())
 }
 
 pub(crate) fn expression(text: &str, edition: Edition) -> Result<ast::Expr> {
-    let parsed = ast::Expr::parse(text, edition);
-    if !parsed.errors().is_empty() {
-        return Err(format!("invalid expression `{text}`: {:?}", parsed.errors()).into());
-    }
-    Ok(parsed.tree())
+    parse(text, |s| ast::Expr::parse(s, edition))
+        .map_err(|errors| format!("invalid expression `{text}`: {errors:?}").into())
 }
 
 pub(crate) fn one<N: AstNode>(root: &SyntaxNode) -> Result<N> {
