@@ -519,14 +519,10 @@ impl Selected<'_> {
             } else {
                 replacement.replace(body.syntax(), make::token(T![;]));
             }
-            let attributes = node
-                .children_with_tokens()
-                .take_while(|element| match element {
-                    SyntaxElement::Node(node) => ast::AnyAttr::can_cast(node.kind()),
-                    SyntaxElement::Token(token) => token.kind().is_trivia(),
-                })
-                .collect::<Vec<_>>();
-            replacement.insert_all(Position::first_child_of(function.syntax()), attributes);
+            replacement.insert_all(
+                Position::first_child_of(function.syntax()),
+                attributes(node).collect(),
+            );
             editor.replace(node, replacement.finish().new_root());
             Ok(())
         })
@@ -617,7 +613,7 @@ impl Selected<'_> {
                 .collect::<String>();
             let target = fragment::expression(&format!("{owner}::{suffix}"), self.source.edition)?;
             return self.edit(|editor, _, _| {
-                editor.replace(call.syntax(), target.syntax());
+                replace_expression(editor, call.syntax(), target);
                 Ok(())
             });
         }
@@ -854,9 +850,10 @@ impl Selected<'_> {
             } else {
                 make::expr_path(helper)
             };
-            editor.replace(
+            replace_expression(
+                editor,
                 node,
-                make::expr_call(helper, make::arg_list(inputs)).syntax(),
+                make::expr_call(helper, make::arg_list(inputs)).into(),
             );
             Ok(())
         })
@@ -892,6 +889,15 @@ impl Selected<'_> {
         if hole.syntax() == template.syntax() {
             return self.edit(|_, _, _| Ok(()));
         }
+        let original = if attributes(original.syntax()).next().is_some() && region.is_none() {
+            let (editor, original) = SyntaxEditor::with_ast_node(&original);
+            for attr in attributes(original.syntax()) {
+                editor.delete(attr);
+            }
+            ast::Expr::cast(editor.finish().new_root().clone()).unwrap()
+        } else {
+            original
+        };
         replace_expression(&wrapper, hole.syntax(), original);
         let wrapped = ast::Expr::cast(wrapper.finish().new_root().clone())
             .ok_or("wrapper is not an expression")?;
@@ -924,7 +930,7 @@ impl Selected<'_> {
                     Some(wrapped.indent(ast::edit::IndentLevel(1))),
                 )
                 .indent(body.indent_level());
-                editor.replace(body.syntax(), replacement.syntax());
+                replace_expression(editor, body.syntax(), replacement.into());
             } else {
                 replace_expression(editor, node, wrapped);
             }
@@ -1193,16 +1199,34 @@ fn import_branch(tree: &ast::UseTree) -> Result<SyntaxNode> {
         .ok_or_else(|| "import has no declaration".into())
 }
 
+fn attributes(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> {
+    node.children_with_tokens()
+        .take_while(|e| ast::AnyAttr::can_cast(e.kind()) || e.kind().is_trivia())
+}
+
 fn replace_expression(editor: &SyntaxEditor, node: &SyntaxNode, expression: ast::Expr) {
-    let expression = if node
-        .parent()
-        .is_some_and(|parent| expression.needs_parens_in_place_of(&parent, node))
+    let attributes: Vec<_> = attributes(node).collect();
+    let expression = if !attributes.is_empty()
+        && matches!(
+            expression,
+            ast::Expr::BinExpr(_) | ast::Expr::CastExpr(_) | ast::Expr::RangeExpr(_)
+        )
+        || node
+            .parent()
+            .is_some_and(|parent| expression.needs_parens_in_place_of(&parent, node))
     {
         make::expr_paren(expression).into()
     } else {
         expression
     };
     let replacement = fragment::indent(expression.syntax(), &fragment::indentation(node));
+    let replacement = if attributes.is_empty() {
+        replacement
+    } else {
+        let (editor, root) = SyntaxEditor::new(replacement);
+        editor.insert_all(Position::first_child_of(&root), attributes);
+        editor.finish().new_root().clone()
+    };
     if let Some(field) = node.parent().and_then(ast::RecordExprField::cast)
         && field.colon_token().is_none()
         && let Some(name) = field.field_name()
