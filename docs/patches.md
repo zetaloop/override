@@ -16,7 +16,7 @@ publish = false
 exclude = ["target/out"]
 
 [dependencies]
-override = "0.5"
+override = "0.6"
 either = "=1.19.0"
 ```
 
