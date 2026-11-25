@@ -378,14 +378,23 @@ impl Selector {
                         );
                     }
                     Step::Trait(name) => {
-                        let expected =
-                            fragment::spelling(fragment::ty(name, source.edition)?.syntax());
-                        if scope
-                            .ancestors()
-                            .into_iter()
-                            .filter_map(ast::Impl::cast)
-                            .filter_map(|implementation| implementation.trait_())
-                            .any(|ty| fragment::spelling(ty.syntax()) == expected)
+                        let expected = fragment::ty(name, source.edition)?;
+                        let mut owners = scope.ancestors().into_iter().filter(|node| {
+                            ast::Item::can_cast(node.kind())
+                                && !ast::MacroCall::can_cast(node.kind())
+                        });
+                        let implementation = owners.next().and_then(|owner| {
+                            ast::Impl::cast(owner)
+                                .or_else(|| owners.next().and_then(ast::Impl::cast))
+                        });
+                        if let Some(implementation) = implementation
+                            && let Some(ty) = implementation.trait_()
+                            && resolve::types_equal(
+                                source,
+                                &scope.at(implementation.syntax().clone()),
+                                &ty,
+                                &expected,
+                            )
                         {
                             next.push(scope.clone());
                         }

@@ -58,7 +58,7 @@ item("State").field("value").of_type("u32")
 item("run").if_expr().references("self.ready")
 ```
 
-`of_type` compares declared types using the available declarations. `references` checks whether the object mentions a path or field expression.
+`implementing` selects an implementation of the named trait, its members and expressions within those members. A local function has its own declaration. `of_type` compares declared types using the available declarations. `references` checks whether the object mentions a path or field expression.
 
 `select` reports an error unless exactly one object matches. Add an enclosing declaration or a filter to narrow an ambiguous query. `Selected::text()` shows what matched.
 
